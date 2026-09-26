@@ -1,125 +1,213 @@
-# CORE Admin
+# CORE — Multi-Tenant Operations Control Center
 
-A tenant-scoped business operations control panel, built into the existing React/Vite project. The original Human / Agent console is preserved and now reads the same mock database as the admin interface.
+> **React 19 + Vite + TypeScript + Tailwind CSS v4**
+> Three AI agents · Four operational tools · White-label ready · Static deploy anywhere
 
-## Runtime And Scope
+---
 
-- React 19, TypeScript, Vite, Tailwind CSS v4, Lucide icons.
-- The existing Vite entry point remains `src/App.tsx`. The `src/app/admin/*/page.tsx` files are modular React pages, not Next.js server routes. There was no Next.js migration.
-- One mock data adapter: `src/services/db.ts`. There is no Supabase project, external backend, real database connection, AI service, or Cloudflare integration.
-- Browser-local persistence uses `core.admin.mock.v1`; unavailable or full storage falls back to the current in-memory session.
-- The default identity is an explicitly mocked platform administrator. This is not authentication, server authorization, or a production security boundary.
-- A clone or deployment has its own browser-origin localStorage. Separate deployments do not share real data until a shared server adapter is implemented.
+**CORE** is a tenant-scoped business operations platform with a full admin dashboard, live operations console, and three autonomous agents — all in one self-contained React application. No backend required. No database setup. Zero infrastructure to start.
 
-## Run And Deploy
+**Built for agencies, operators, and teams who want to white-label a complete operations system and ship it under their own brand.**
 
-Install the project dependencies and start the existing Vite development task. The build task produces `dist/`, which can be published to a static host. No environment variables or service credentials are required.
+---
 
-Navigation uses hash routes so client-side links work on static hosting without custom backend rewrites:
+## What It Is
 
-- `#/admin/dashboard`: overview and interactive activity chart
-- `#/admin/tenants`: create, view, edit, and delete tenant workspaces
-- `#/admin/agents`: per-tenant enablement, JSON behavior, workflow tests, activity
-- `#/admin/leads`: filtering, status updates, assignment, lead history, mock outbox
-- `#/admin/bookings`: filtering, status updates, assignment, booking timelines
-- `#/admin/logs`: searchable event stream, pause/resume view, payload inspection, JSON export
-- `#/admin/branding`: app name, logo/lettermark, accent, dark/light theme, live preview
-- `#/admin/rules`: validated tenant JSON rules and rule reference
-- `#/console`: original Human / Agent interface for the selected tenant (first tenant if All tenants is selected)
+A complete business operations interface with two views in one codebase:
 
-`Ctrl/Cmd + K` opens workspace/page search. The sidebar tenant switcher filters the entire admin workspace. The help icon opens runtime controls, read-only isolation diagnostics, and a guarded demo-data reset.
+| View | Route | Purpose |
+|---|---|---|
+| **Admin Dashboard** | `#/admin/*` | Full management: tenants, agents, leads, bookings, logs, branding, rules, settings |
+| **Operations Console** | `#/console` | Live Human / Agent dual-mode preview with boot sequence, activity stream, agent panel, control panel |
 
-## Updated Code Tree
+Both views share the same tenant-scoped mock runtime — what you see in admin is what the console operates on.
 
-```text
-src/
-  App.tsx                         Existing entry point; admin/console routing
-  OperationsConsole.tsx           Preserved Human / Agent console
-  app/admin/
-    AdminApp.tsx                  Responsive shell, search, notifications, environment
-    AdminContext.tsx              Mock session, scope, subscriptions, live simulation
-    admin.css                     Scoped dark/light design system
-    dashboard/page.tsx
-    tenants/page.tsx
-    tenants/TenantDialogs.tsx
-    agents/page.tsx
-    leads/page.tsx
-    bookings/page.tsx
-    logs/page.tsx
-    branding/page.tsx
-    rules/page.tsx
-    components/shared.tsx
-    components/RecordTimeline.tsx
-    utils.ts
-  agents/
-    tala.ts
-    nyx.ts
-    hermes.ts
-    shared.ts
-  api/
-    tenants.ts
-    agents.ts
-    leads.ts
-    bookings.ts
-    messages.ts
-    events.ts
-  core/
-    eventBus.ts
-    dispatcher.ts
-    tenantResolver.ts
-    isolationChecks.ts
-  services/
-    db.ts                         Sole data-access interface; mock only
-    seed.ts                       Tenant-scoped demonstration records
-  config/
-    platform.ts                   Platform identity, mock session, default agent rules
-    tenants.ts                    Initial BAIA / Azarraga / Marina / other presets
-  types/
-    database.ts                   Tenant, user, lead, booking, message, event, agent types
-  components/
-    tables/DataTable.tsx          Sortable, paginated, accessible tables
-    sidebar/AdminSidebar.tsx      Navigation and admin-only workspace switcher
-    charts/ActivityChart.tsx      Data-derived interactive SVG chart
-    ...                           Preserved console UI components
-  system/
-    consoleAdapter.ts             Tenant-scoped adapter for the original interface
-    useSystemEngine.ts            Compatibility exports, not another database
-    types.ts
-    config.ts
+---
+
+## Three Agents
+
+The platform ships with three purpose-built agents wired to a typed event bus and dispatcher:
+
+| Agent | Role | What It Does |
+|---|---|---|
+| **TALA** | Guest experience & intake | Captures inbound inquiries, responds with templated auto-replies, hands off bookings |
+| **NYX** | Growth, scoring & outreach | Scores leads (deterministic rules), triggers 24h follow-ups, qualifies prospects |
+| **HERMES** | Operations & ledger sync | Confirms pending bookings, dispatches staff notifications, reconciles tenant records |
+
+**Event flow:** `API → eventBus → dispatcher → agent → scoped DB → UI subscription`. Agents never import each other. Every action is an auditable event. The simulator fires a scoped request every 18 seconds while enabled.
+
+---
+
+## Four Operational Tools
+
+| Tool | Category | Outcome |
+|---|---|---|
+| **Lead Capture & CRM Intake** | Leads & CRM | Captures inquiries from web, WhatsApp, Instagram, email — scored and stored |
+| **Booking & Reservation Scheduler** | Bookings & Revenue | Creates holds, confirms bookings, assigns reference codes, tracks pipeline value |
+| **WhatsApp & Multi-Channel Responder** | Messaging & Outreach | Instant first responses + 24h follow-up sequences across channels |
+| **Operations & Staff Dispatch Ledger** | Operations & Audit | Staff notifications on confirmed bookings, immutable audit trail, record reconciliation |
+
+---
+
+## Ten Admin Pages
+
+- **Dashboard** — overview with interactive activity chart, today's metrics, recent events
+- **Tenants** — create, view, edit, delete tenant workspaces; per-tenant agents, rules, branding
+- **Agents & AI** — per-tenant enablement, JSON behavior config, OpenRouter model assignment, workflow tests, activity log
+- **Tools & Outcomes** — tool enablement, webhook URL configuration, run counts, last outcome per tool
+- **Leads** — filtering, status updates, agent assignment, lead history, mock outbox
+- **Bookings** — filtering, status updates, assignment, booking timelines, revenue totals
+- **Logs** — searchable event stream, pause/resume view, payload inspection, JSON export
+- **Branding** — app name, logo/lettermark, accent color, dark/light theme, live preview
+- **Rules** — validated per-agent JSON rules, rule reference, what each agent does
+- **Settings** — OpenRouter API key, model catalog sync (live fetch + cache), environment diagnostics
+
+**Navigating:** `Ctrl/Cmd + K` opens workspace/page search. Sidebar tenant switcher filters the entire admin workspace. Help icon opens runtime controls, isolation diagnostics, and guarded demo-data reset.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Framework | React 19 + TypeScript |
+| Build | Vite 7 |
+| CSS | Tailwind CSS v4 + custom dark/light design system |
+| Icons | Lucide React |
+| Routing | Hash-based (`#/admin/...`, `#/console`) — works on any static host |
+| Build output | Single self-contained HTML file (`vite-plugin-singlefile`) |
+| State | Event bus + dispatcher + React contexts — no Redux, no Zustand |
+| Data | Browser localStorage mock (`core.admin.mock.v1`) — zero backend |
+| AI integration | OpenRouter model catalog (live fetch, daily cache, key validation, 5 free + 5 paid models pre-configured) |
+| Mock runtime | 6 seeded tenant workspaces: BAIA, Azarraga Glass, Marina Terrace, Aurelia Suites, Studio North, The Atrium |
+
+---
+
+## Run It
+
+```bash
+cd live-agent-system
+npm install
+npm run dev        # → localhost:5173
+npm run build      # → dist/ (single HTML file for any static host)
 ```
 
-## Mock Data Model
+**No environment variables needed.** No `.env` file. No database connection. No API keys. The app runs fully from the browser.
 
-`tenants` contains UUID `id`, `name`, unique `slug`, `industry`, `status`, `branding_config`, per-agent `rules`, optional console settings, and `created_at`.
+---
 
-`users`, `leads`, `bookings`, `messages`, `events`, and agent configurations each carry `tenant_id`. All records are created or queried through `db.forTenant(resolveTenant(session, tenant_id))`. The adapter filters lists, rejects foreign record IDs, checks message-to-lead references, and returns copies rather than mutable references to its state.
+## White-Label Ready
 
-There is no unscoped records query. The platform overview first authorizes the tenant registry, then resolves and combines separately scoped queries. Tenant creation/listing are registry-level admin operations. Deletion requires platform-admin role and cascades only the selected tenant's records.
+Change two config files for clone-time defaults — not UI components, not agents:
 
-## Event Flow
+- `src/config/platform.ts` — platform name, branding defaults, agent rules, OpenRouter configs, 4 tool webhook stubs
+- `src/config/tenants.ts` — initial workspace presets (name, slug, industry, initials, accent, status)
 
-Agent actions use `API -> eventBus -> dispatcher -> agent -> scoped DB -> UI subscription`. Agents never import or call one another. Emitted result events are audit entries and do not recursively trigger unrelated agents.
+Existing local data is not overwritten by preset changes. Use the guarded reset in the environment panel to reseed the mock.
 
-- TALA: `inquiry.received` creates a lead. `lead.created` stores a template response in the mock outbox and changes a new lead to contacted.
-- NYX: `lead.created` scores the inquiry with deterministic rules. Follow-up requests respect conversion state and configured delay; an explicit test can bypass the delay.
-- HERMES: booking events confirm pending reservations when configured, optionally create a local staff notification, and log the result. A sync request reconciles tenant record counts.
-- CRUD operations write through the same scoped adapter and publish audit events.
-- The simulator emits a scoped request every 18 seconds while enabled. Disabling it does not disable manual actions. Pausing the log feed freezes only that view.
+**Create a workspace in Tenants → edit its brand in Branding.** Unsaved changes update the preview immediately. Saved branding updates the selected workspace, app title, accent, theme, and TALA's `{business}` response template.
 
-The dispatcher honors tenant status, agent enablement, and the tenant's stored rule selection. JSON configuration is validated before saving. No LLM calls or multi-model routing are present.
+---
 
-## White-Label Reuse
+## Architecture
 
-Create a workspace in Tenants, then edit its brand in Branding. Unsaved changes update the preview immediately; saved branding updates the selected workspace, app title, accent, theme, and TALA's `{business}` response template.
+```
+src/
+  App.tsx                         Entry point — admin/console routing
+  OperationsConsole.tsx           Live Human / Agent console
+  app/admin/
+    AdminApp.tsx                  Responsive shell, search, notifications, environment dialog
+    AdminContext.tsx              Mock session, scope, subscriptions, live simulation
+    admin.css                     Scoped dark/light design system
+    dashboard/page.tsx            Overview + activity chart
+    tenants/page.tsx + TenantDialogs.tsx  Workspace CRUD
+    agents/page.tsx              Per-tenant agent config, enablement, tests
+    leads/page.tsx               Filtering, status, assignment, history
+    bookings/page.tsx            Filtering, status, assignment, timelines
+    logs/page.tsx                Searchable event stream, payload inspection, JSON export
+    branding/page.tsx            App name, logo, accent, theme, live preview
+    rules/page.tsx               Validated tenant JSON rules, rule reference
+    tools/page.tsx               Tool enablement, webhook URLs, run counts
+    settings/page.tsx            OpenRouter key, model catalog sync, diagnostics
+    components/shared.tsx         Shared UI: tables, modals, toggles, empty states
+    components/OpenRouterSync.tsx Model catalog sync indicator
+    components/RecordTimeline.tsx Audit timeline component
+    utils.ts                     Admin utilities
+  agents/
+    tala.ts                      TALA agent logic
+    nyx.ts                       NYX agent logic
+    hermes.ts                    HERMES agent logic
+    shared.ts                    Shared action-tracking helper
+  api/
+    tenants.ts                   Tenant CRUD operations
+    agents.ts                    Agent config operations
+    leads.ts                     Lead operations
+    bookings.ts                  Booking operations
+    messages.ts                  Message operations
+    events.ts                    Event trigger + listing
+    tools.ts                     Tool operations
+  core/
+    eventBus.ts                  Typed event bus — publish/subscribe with recursion guard
+    dispatcher.ts                Routes events to agents based on tenant status + rules
+    tenantResolver.ts            Session + tenant access checks
+    isolationChecks.ts           Read-only environment diagnostics
+  services/
+    db.ts                        Sole data-access interface — localStorage mock, tenant-scoped
+    seed.ts                      Tenant-scoped demonstration records
+    openrouter.ts                Live OpenRouter model catalog with daily refresh + caching
+  config/
+    platform.ts                  Platform identity, mock session, default agent rules
+    tenants.ts                   Initial workspace presets
+  types/
+    database.ts                  All TypeScript types: tenant, user, lead, booking, message, event, agent
+  components/
+    tables/DataTable.tsx         Sortable, paginated, accessible tables
+    sidebar/AdminSidebar.tsx     Navigation + admin-only workspace switcher
+    charts/ActivityChart.tsx     Data-derived interactive SVG chart
+    ...                          Preserved console UI components (Hero, AgentPanel, ActivityStream, etc.)
+  system/
+    consoleAdapter.ts            Tenant-scoped adapter for the original console interface
+    useSystemEngine.ts           Compatibility exports
+    types.ts                     Console-specific types + metrics + ledger + pipeline
+    config.ts                    Console config: agent defs, ledger defs, pipeline defs, accents, brand defaults
+    useSystemEngine.ts           React hook for system state
+```
 
-For clone-time defaults, change `src/config/platform.ts` and `src/config/tenants.ts`, not UI components or agents. Existing local data is not overwritten by preset changes; use the guarded reset in the environment panel to reseed the mock.
+---
 
-Select a tenant before using Client console. Its lead updates, pause/resume commands, agent dispatches, and identity edits are reflected in the admin interface because both use the same adapter. The original independent random event generator has been removed. The **HUMAN** and **AGENT / SYSTEM** buttons remain in the client console header, in a reserved slot that cannot be displaced by telemetry.
+## Production Readiness
 
-## Verification And Production Readiness
+The production bundle builds successfully. Before real production use:
 
-The production bundle has been built successfully. Read-only diagnostics are available under Help / System environment / Run checks. A manual interaction checklist is in `docs/QA.md`. Automated browser interaction tests and deployment were not performed in this environment.
+1. Replace the mock session with verified authentication
+2. Move tenant checks and agent actions to a trusted server
+3. Add database constraints and server-enforced row-level authorization
+4. Make workflows transactional and idempotent
+5. Add durable scheduling, monitoring, and integration tests
 
-Before real production use, replace the mock session with verified authentication, execute tenant checks and agent actions on a trusted server, add database constraints and server-enforced row-level authorization, make workflows transactional/idempotent, and add durable scheduling, monitoring, and integration tests. Browser role checks and localStorage are not security boundaries. No real guest communications, payments, deployments, or provider connections are claimed by this implementation.
+Browser role checks and localStorage are **not** security boundaries. No real guest communications, payments, deployments, or provider connections are claimed by this implementation.
 
-If a future shared database is connected, retain this tenant-scoped architecture and a single backend. Do not create a backend or database per tenant or agent.
+When a shared database is connected, retain the tenant-scoped architecture and a single backend. Do not create a backend or database per tenant or agent.
+
+---
+
+## Deployment
+
+Build the project and publish `dist/` to any static host:
+
+- **Cloudflare Pages** — free, global edge, custom domain via Cloudflare Tunnel or CNAME
+- **GitHub Pages** — free, simple
+- **Netlify** — free tier available
+- **Any static host** — S3 + CloudFront, Vercel, etc.
+
+Hash routing means no backend rewrites needed. OpenRouter calls are browser-side fetches — work on static hosting.
+
+---
+
+## License
+
+MIT
+
+---
+
+*Built by SanVicPalawan — Palawan Collective / merQato.digital*
