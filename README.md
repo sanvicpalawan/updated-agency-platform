@@ -36,6 +36,14 @@ The platform ships with three purpose-built agents wired to a typed event bus an
 
 **Event flow:** `API → eventBus → dispatcher → agent → scoped DB → UI subscription`. Agents never import each other. Every action is an auditable event. The simulator fires a scoped request every 18 seconds while enabled.
 
+| Agent | Trigger Event | Behavior |
+|---|---|---|
+| **TALA** | `inquiry.received` → `lead.created` | Creates a lead, stores a template response in the mock outbox, changes lead status to contacted |
+| **NYX** | `lead.created` | Scores the inquiry with deterministic rules, triggers 24h follow-ups respecting conversion state |
+| **HERMES** | Booking events | Confirms pending bookings when configured, creates local staff notifications, reconciles tenant record counts |
+
+CRUD operations write through the same scoped adapter and publish audit events. The dispatcher honors tenant status, agent enablement, and the tenant's stored rule selection. JSON configuration is validated before saving. Disabling an agent skips its automated actions; a manual "Run test" bypasses the delay. Pausing the log feed freezes only that view.
+
 ---
 
 ## Four Operational Tools
@@ -171,6 +179,16 @@ src/
     types.ts                     Console-specific types + metrics + ledger + pipeline
     config.ts                    Console config: agent defs, ledger defs, pipeline defs, accents, brand defaults
 ```
+
+---
+
+## Mock Data Model
+
+`tenants` contains UUID `id`, `name`, unique `slug`, `industry`, `status`, `branding_config`, per-agent `rules`, optional console settings, and `created_at`.
+
+`users`, `leads`, `bookings`, `messages`, `events`, and agent configurations each carry `tenant_id`. All records are created or queried through `db.forTenant(resolveTenant(session, tenant_id))`. The adapter filters lists, rejects foreign record IDs, checks message-to-lead references, and returns copies rather than mutable references to its state.
+
+There is no unscoped records query. The platform overview first authorizes the tenant registry, then resolves and combines separately scoped queries. Tenant creation/listing are registry-level admin operations. Deletion requires platform-admin role and cascades only the selected tenant's records.
 
 ---
 
