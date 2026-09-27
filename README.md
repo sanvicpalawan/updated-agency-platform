@@ -167,10 +167,9 @@ src/
     ...                          Preserved console UI components (Hero, AgentPanel, ActivityStream, etc.)
   system/
     consoleAdapter.ts            Tenant-scoped adapter for the original console interface
-    useSystemEngine.ts           Compatibility exports
+    useSystemEngine.ts           Compatibility re-export: engine + useSystem hook
     types.ts                     Console-specific types + metrics + ledger + pipeline
     config.ts                    Console config: agent defs, ledger defs, pipeline defs, accents, brand defaults
-    useSystemEngine.ts           React hook for system state
 ```
 
 ---
