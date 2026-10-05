@@ -11,6 +11,26 @@
 
 ---
 
+## ⚠️ Read This Before You Use It
+
+This is a **demonstration application**. It is excellent for previews, pitches and
+white-label handoffs. It must not hold real or sensitive data.
+
+- **No backend, no database.** Every record lives in the browser's `localStorage`.
+- **The agents are deterministic rule scripts.** They do not call a language model.
+- **Tenant isolation is client-side only.** It prevents accidental cross-tenant
+  reads in the UI. It does not prevent anyone with devtools from reading every
+  tenant's data.
+- **OpenRouter API keys entered here are stored in plaintext in the browser.**
+  Never use a production key.
+- **The WhatsApp panel is a mock.** The QR block is locally generated and is not
+  a scannable code. No message is ever sent.
+
+**[SECURITY.md](./SECURITY.md) has the full threat picture and the ordered list of
+what a production version needs.**
+
+---
+
 ## What It Is
 
 A complete business operations interface with two views in one codebase:
