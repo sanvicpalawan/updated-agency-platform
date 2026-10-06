@@ -8,12 +8,12 @@ import { toolsApi } from "../api/tools";
 import {
   AGENT_IDS,
   createDefaultToolsConfig,
-  DEFAULT_AGENT_BEHAVIOR,
-  DEFAULT_AGENT_OPENROUTER,
   DEFAULT_RULES,
-  MOCK_ADMIN,
+  mergeBehavior,
+  mergeOpenRouter,
   TOOL_IDS,
 } from "../config/platform";
+import { requireSession } from "../services/auth";
 import { resolveTenant } from "../core/tenantResolver";
 import { db } from "../services/db";
 import type {
@@ -63,19 +63,19 @@ class ConsoleAdapter {
   }
 
   private selectStoredTenant() {
-    const tenants = tenantsApi.list(MOCK_ADMIN);
+    const tenants = tenantsApi.list(requireSession());
     let stored = "";
     try { stored = localStorage.getItem("core.admin.scope") ?? ""; } catch { /* fallback */ }
     this.tenantId = tenants.find((tenant) => tenant.id === stored)?.id ?? tenants[0]?.id ?? null;
   }
 
   private tenant(): Tenant | undefined {
-    return tenantsApi.list(MOCK_ADMIN).find((tenant) => tenant.id === this.tenantId);
+    return tenantsApi.list(requireSession()).find((tenant) => tenant.id === this.tenantId);
   }
 
   private context() {
     if (!this.tenantId) throw new Error("Create a tenant in the admin console first.");
-    return resolveTenant(MOCK_ADMIN, this.tenantId);
+    return resolveTenant(requireSession(), this.tenantId);
   }
 
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -97,7 +97,7 @@ class ConsoleAdapter {
     this.simulator = window.setInterval(() => {
       const tenant = this.tenant();
       if (!tenant || tenant.status !== "active") return;
-      try { eventsApi.trigger(MOCK_ADMIN, tenant.id, AGENT_IDS[turn++ % AGENT_IDS.length], true); }
+      try { eventsApi.trigger(requireSession(), tenant.id, AGENT_IDS[turn++ % AGENT_IDS.length], true); }
       catch { /* Disabled or manual agents remain idle. */ }
     }, 18_000);
     this.refresh();
@@ -116,7 +116,7 @@ class ConsoleAdapter {
    */
   private publish(type: string, message: string, payload: Record<string, unknown> = {}, level?: "info" | "success" | "warning" | "error") {
     void eventsApi
-      .publish(MOCK_ADMIN, this.context().tenant_id, { type, message, payload, level })
+      .publish(requireSession(), this.context().tenant_id, { type, message, payload, level })
       .catch(() => undefined);
   }
 
@@ -127,7 +127,7 @@ class ConsoleAdapter {
   }
 
   switchTenant(id: string) {
-    const found = tenantsApi.list(MOCK_ADMIN).find((t) => t.id === id);
+    const found = tenantsApi.list(requireSession()).find((t) => t.id === id);
     if (!found) return;
     this.tenantId = found.id;
     try { localStorage.setItem("core.admin.scope", found.id); } catch { /* ignore */ }
@@ -141,18 +141,18 @@ class ConsoleAdapter {
     if (!name.trim()) return;
     this.command("Brand identity saved", () => {
       const tenant = db.getTenant(this.context());
-      tenantsApi.update(MOCK_ADMIN, tenant.id, { branding_config: { ...tenant.branding_config, app_name: name } });
+      tenantsApi.update(requireSession(), tenant.id, { branding_config: { ...tenant.branding_config, app_name: name } });
     });
   }
 
   setBrandType(type: string) {
-    this.command("Business type saved", () => { tenantsApi.update(MOCK_ADMIN, this.context().tenant_id, { industry: type }); });
+    this.command("Business type saved", () => { tenantsApi.update(requireSession(), this.context().tenant_id, { industry: type }); });
   }
 
   setOpenRouterKey(apiKey: string) {
     this.command("OpenRouter API key saved", () => {
       const tenant = db.getTenant(this.context());
-      tenantsApi.update(MOCK_ADMIN, tenant.id, { openrouter_api_key: apiKey.trim() });
+      tenantsApi.update(requireSession(), tenant.id, { openrouter_api_key: apiKey.trim() });
     });
   }
 
@@ -165,56 +165,56 @@ class ConsoleAdapter {
     },
   ) {
     this.command(`${agent.toUpperCase()} settings saved`, () => {
-      agentsApi.update(MOCK_ADMIN, this.context().tenant_id, agent, patch);
+      agentsApi.update(requireSession(), this.context().tenant_id, agent, patch);
     });
   }
 
   runTool(toolId: ToolId) {
     this.command(`Executed tool ${toolId}`, () => {
-      toolsApi.runTool(MOCK_ADMIN, this.context().tenant_id, toolId);
+      toolsApi.runTool(requireSession(), this.context().tenant_id, toolId);
     });
   }
 
   toggleTool(toolId: ToolId, enabled: boolean) {
     this.command(`${toolId} ${enabled ? "enabled" : "disabled"}`, () => {
-      toolsApi.update(MOCK_ADMIN, this.context().tenant_id, toolId, { enabled });
+      toolsApi.update(requireSession(), this.context().tenant_id, toolId, { enabled });
     });
   }
 
   createLead(input: { name: string; email: string; channel: DbChannel; inquiry: string }) {
     this.command(`Lead added: ${input.name}`, () => {
-      leadsApi.create(MOCK_ADMIN, this.context().tenant_id, input);
+      leadsApi.create(requireSession(), this.context().tenant_id, input);
     });
   }
 
   deleteLead(id: string) {
     this.command("Lead deleted", () => {
-      leadsApi.remove(MOCK_ADMIN, this.context().tenant_id, id);
+      leadsApi.remove(requireSession(), this.context().tenant_id, id);
     });
   }
 
   createBooking(input: { guest: string; email: string; service: string; date: string; amount: number }) {
     this.command(`Booking added: ${input.guest}`, () => {
-      bookingsApi.create(MOCK_ADMIN, this.context().tenant_id, input);
+      bookingsApi.create(requireSession(), this.context().tenant_id, input);
     });
   }
 
   confirmBooking(id: string) {
     this.command("Booking confirmed", () => {
-      bookingsApi.update(MOCK_ADMIN, this.context().tenant_id, id, { status: "confirmed" });
+      bookingsApi.update(requireSession(), this.context().tenant_id, id, { status: "confirmed" });
     });
   }
 
   deleteBooking(id: string) {
     this.command("Booking deleted", () => {
-      bookingsApi.remove(MOCK_ADMIN, this.context().tenant_id, id);
+      bookingsApi.remove(requireSession(), this.context().tenant_id, id);
     });
   }
 
   setAutonomy(autonomy: Autonomy) {
     this.command(`Autonomy level ${autonomy}`, () => {
       const tenant = db.getTenant(this.context());
-      tenantsApi.update(MOCK_ADMIN, tenant.id, { console_config: { ...(tenant.console_config ?? defaultConsoleConfig), autonomy }, rules: autonomy === 1 ? { tala: "manual", nyx: "manual", hermes: "manual" } : { ...DEFAULT_RULES } });
+      tenantsApi.update(requireSession(), tenant.id, { console_config: { ...(tenant.console_config ?? defaultConsoleConfig), autonomy }, rules: autonomy === 1 ? { tala: "manual", nyx: "manual", hermes: "manual" } : { ...DEFAULT_RULES } });
     });
   }
 
@@ -223,7 +223,7 @@ class ConsoleAdapter {
       const context = this.context();
       const tenant = db.getTenant(context);
       const config = tenant.console_config ?? defaultConsoleConfig;
-      tenantsApi.update(MOCK_ADMIN, tenant.id, { console_config: { ...config, channels: { ...config.channels, [id]: connected } } });
+      tenantsApi.update(requireSession(), tenant.id, { console_config: { ...config, channels: { ...config.channels, [id]: connected } } });
       this.publish("channel.mock_updated", `${id} mock channel ${connected ? "enabled" : "disabled"}`, { channel: id, connected, provider: "mock_only" });
     });
   }
@@ -231,20 +231,20 @@ class ConsoleAdapter {
   halt() {
     this.command("Tenant execution updated", () => {
       const tenant = db.getTenant(this.context());
-      tenantsApi.update(MOCK_ADMIN, tenant.id, { status: tenant.status === "active" ? "paused" : "active" });
+      tenantsApi.update(requireSession(), tenant.id, { status: tenant.status === "active" ? "paused" : "active" });
     });
   }
 
   triggerResponse(agent?: AgentId) {
     const worker: WorkerId = agent && agent !== "core" ? agent : "tala";
-    this.command(`Dispatch ${worker.toUpperCase()}`, () => { eventsApi.trigger(MOCK_ADMIN, this.context().tenant_id, worker); });
+    this.command(`Dispatch ${worker.toUpperCase()}`, () => { eventsApi.trigger(requireSession(), this.context().tenant_id, worker); });
   }
 
   qualifyLead(id: string) {
     this.command("Lead status updated", () => {
       const context = this.context();
       const lead = db.forTenant(context).get("leads", id);
-      leadsApi.update(MOCK_ADMIN, context.tenant_id, id, { status: lead.status === "new" ? "contacted" : "converted" });
+      leadsApi.update(requireSession(), context.tenant_id, id, { status: lead.status === "new" ? "contacted" : "converted" });
     });
   }
 
@@ -252,13 +252,13 @@ class ConsoleAdapter {
     this.command("Attention queue reviewed", () => {
       const context = this.context();
       const tenant = db.getTenant(context);
-      tenantsApi.update(MOCK_ADMIN, tenant.id, { console_config: { ...(tenant.console_config ?? defaultConsoleConfig), last_reviewed_at: new Date().toISOString() } });
-      this.publish("review.completed", "Operator reviewed the attention queue", { actor: MOCK_ADMIN.name }, "success");
+      tenantsApi.update(requireSession(), tenant.id, { console_config: { ...(tenant.console_config ?? defaultConsoleConfig), last_reviewed_at: new Date().toISOString() } });
+      this.publish("review.completed", "Operator reviewed the attention queue", { actor: requireSession().name }, "success");
     });
   }
 
   exportBundle() {
-    this.command("Tenant data export prepared", () => { this.publish("data.exported", "Tenant data export prepared", { actor: MOCK_ADMIN.name }, "success"); });
+    this.command("Tenant data export prepared", () => { this.publish("data.exported", "Tenant data export prepared", { actor: requireSession().name }, "success"); });
   }
 
   connectWhatsApp() { this.setChannel("whatsapp", true); }
@@ -269,9 +269,9 @@ class ConsoleAdapter {
   }
 
   private derive(): SystemState {
-    const allTenants = tenantsApi.list(MOCK_ADMIN);
+    const allTenants = tenantsApi.list(requireSession());
     const tenant = this.tenant();
-    const data = tenant ? getAdminData(MOCK_ADMIN, tenant.id) : emptyData;
+    const data = tenant ? getAdminData(requireSession(), tenant.id) : emptyData;
     const now = Date.now();
     const start = new Date(); start.setHours(0, 0, 0, 0);
     const today = data.events.filter((event) => Date.parse(event.created_at) >= start.getTime());
@@ -284,8 +284,8 @@ class ConsoleAdapter {
       const lastAt = config?.last_active_at ? Date.parse(config.last_active_at) : this.openedAt;
       const busy = active && !halted && now - lastAt < 1800;
       const actions = config?.actions_completed ?? data.events.length;
-      const orCfg = id !== "core" ? (config?.openrouter ?? DEFAULT_AGENT_OPENROUTER[id]) : undefined;
-      const behCfg = id !== "core" ? (config?.behavior ?? DEFAULT_AGENT_BEHAVIOR[id]) : undefined;
+      const orCfg = id !== "core" ? mergeOpenRouter(id, config?.openrouter) : undefined;
+      const behCfg = id !== "core" ? mergeBehavior(id, config?.behavior) : undefined;
       agents[id] = {
         id,
         tenant_id: tenant?.id ?? null,

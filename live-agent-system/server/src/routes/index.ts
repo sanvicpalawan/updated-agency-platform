@@ -3,8 +3,18 @@
  *
  * Every route is tenant-scoped through `?tenant_id=`. There is deliberately no
  * unscoped record endpoint: a missing tenant_id is a 400, never a global read.
+ *
+ * Authentication (replaces the old trust-the-client model):
+ *   - POST /api/auth/login exchanges email+password for a bearer token.
+ *   - Every other route requires `Authorization: Bearer <token>`.
+ *   - Platform admins may address any tenant; tenant users are PINNED to the
+ *     tenant recorded on their session — a tenant_id pointing anywhere else
+ *     is a 403, never trusted.
+ *   - GET /api/snapshot returns the whole platform for platform admins only;
+ *     tenant users receive a snapshot scoped to their own tenant.
  */
 import { Router, type Request, type Response, type NextFunction } from "express";
+import { db } from "../db/connection.ts";
 import {
   agents as agentsRepo,
   messages as messagesRepo,
@@ -21,7 +31,18 @@ import { runtimeInfo } from "../agents/runtime.ts";
 import { executeTool, hasTool, listTools } from "../tools/registry.ts";
 import { dbPath, resetDatabase } from "../db/connection.ts";
 import { seedIfEmpty } from "../db/seed.ts";
-import type { TenantContext } from "../types.ts";
+import { verifyPassword } from "../auth/passwords.ts";
+import { createSession, destroySession, getSession } from "../auth/sessions.ts";
+import type { AuthSession, TenantContext } from "../types.ts";
+
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace Express {
+    interface Request {
+      auth?: AuthSession;
+    }
+  }
+}
 
 export const router = Router();
 
@@ -34,14 +55,119 @@ class HttpError extends Error {
   }
 }
 
-/** Resolve + validate the tenant scope. Throws 400 when absent. */
-function ctx(req: Request): TenantContext {
-  const id = String(req.query.tenant_id ?? req.body?.tenant_id ?? "");
-  if (!id || id === "all") {
-    throw new HttpError(400, "tenant_id is required (a specific tenant, not 'all')");
+/* ------------------------------------------------------------------ */
+/* auth                                                                */
+/* ------------------------------------------------------------------ */
+
+interface UserRecord {
+  id: string;
+  tenant_id: string | null;
+  name: string;
+  email: string;
+  role: "admin" | "member";
+  password_hash: string;
+}
+
+/** Tiny in-memory brute-force brake: 5 failures per email → 60s lockout. */
+const failedLogins = new Map<string, { count: number; lockedUntil: number }>();
+const LOGIN_MAX_FAILURES = 5;
+const LOGIN_LOCKOUT_MS = 60_000;
+
+function loginLocked(email: string): boolean {
+  const entry = failedLogins.get(email);
+  return Boolean(entry && entry.count >= LOGIN_MAX_FAILURES && Date.now() < entry.lockedUntil);
+}
+function recordLoginFailure(email: string): void {
+  const entry = failedLogins.get(email) ?? { count: 0, lockedUntil: 0 };
+  entry.count += 1;
+  entry.lockedUntil = entry.count >= LOGIN_MAX_FAILURES ? Date.now() + LOGIN_LOCKOUT_MS : entry.lockedUntil;
+  failedLogins.set(email, entry);
+}
+
+router.post("/auth/login", (req: Request, res: Response) => {
+  const email = String(req.body?.email ?? "").trim().toLowerCase();
+  const password = String(req.body?.password ?? "");
+  if (!email || !password) {
+    res.status(400).json({ error: "email and password are required" });
+    return;
   }
-  tenantsRepo.require(id);
-  return { tenant_id: id };
+  if (loginLocked(email)) {
+    res.status(429).json({ error: "Too many failed attempts. Try again in a minute." });
+    return;
+  }
+  const user = db.prepare("SELECT * FROM users WHERE lower(email) = ?").get(email) as
+    | UserRecord
+    | undefined;
+  if (!user || !verifyPassword(password, user.password_hash)) {
+    recordLoginFailure(email);
+    // Same response for unknown email and wrong password — no enumeration.
+    res.status(401).json({ error: "Invalid email or password." });
+    return;
+  }
+  failedLogins.delete(email);
+  const { token, session } = createSession(user);
+  res.json({ token, session });
+});
+
+/** Public endpoints that do not require a bearer token. */
+const PUBLIC_PATHS = new Set(["/health", "/auth/login"]);
+
+router.use((req: Request, res: Response, next: NextFunction) => {
+  if (PUBLIC_PATHS.has(req.path)) {
+    next();
+    return;
+  }
+  const header = req.headers.authorization ?? "";
+  const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
+  const session = token ? getSession(token) : undefined;
+  if (!session) {
+    res.status(401).json({ error: "Authentication required. Sign in to continue." });
+    return;
+  }
+  req.auth = session;
+  // Store the raw token on the request for logout without re-parsing headers.
+  (req as Request & { bearerToken?: string }).bearerToken = token;
+  next();
+});
+
+function auth(req: Request): AuthSession {
+  if (!req.auth) throw new HttpError(401, "Authentication required.");
+  return req.auth;
+}
+
+function requirePlatformAdmin(req: Request): AuthSession {
+  const session = auth(req);
+  if (session.role !== "platform_admin") {
+    throw new HttpError(403, "Platform administrator access is required.");
+  }
+  return session;
+}
+
+/**
+ * Resolve + validate the tenant scope.
+ *
+ * Platform admins may name any existing tenant. Everyone else is pinned to
+ * the tenant on their session: a mismatched or foreign tenant_id is a 403 —
+ * the value supplied by the client is never trusted on its own.
+ */
+function ctx(req: Request): TenantContext {
+  const session = auth(req);
+  const requested = String(req.query.tenant_id ?? req.body?.tenant_id ?? "");
+
+  if (session.role === "platform_admin") {
+    if (!requested || requested === "all") {
+      throw new HttpError(400, "tenant_id is required (a specific tenant, not 'all')");
+    }
+    tenantsRepo.require(requested);
+    return { tenant_id: requested };
+  }
+
+  if (!session.tenant_id) throw new HttpError(403, "This account has no tenant workspace.");
+  tenantsRepo.require(session.tenant_id);
+  if (requested && requested !== "all" && requested !== session.tenant_id) {
+    throw new HttpError(403, "Access denied: that tenant is outside your workspace.");
+  }
+  return { tenant_id: session.tenant_id };
 }
 
 const wrap =
@@ -70,34 +196,90 @@ router.get(
 );
 
 router.get(
+  "/auth/me",
+  wrap((req) => ({ session: auth(req) })),
+);
+
+router.post(
+  "/auth/logout",
+  wrap((req) => {
+    destroySession((req as Request & { bearerToken?: string }).bearerToken ?? "");
+    return { ok: true };
+  }),
+);
+
+router.get(
   "/tenants",
-  wrap(() => ({ tenants: tenantsRepo.list() })),
+  wrap((req) => {
+    const session = auth(req);
+    const all = tenantsRepo.list();
+    return {
+      tenants:
+        session.role === "platform_admin"
+          ? all
+          : all.filter((t) => t.id === session.tenant_id),
+    };
+  }),
 );
 
 router.post(
   "/tenants",
   wrap((req) => {
-    const { name, slug, industry, status, branding_config, tools_config } = req.body ?? {};
+    requirePlatformAdmin(req);
+    const { name, slug, industry, status, branding_config, tools_config, openrouter_api_key } =
+      req.body ?? {};
     if (!name || !slug || !branding_config) {
       throw new HttpError(400, "tenants.name, tenants.slug and tenants.branding_config are required");
     }
-    const tenant = tenantsRepo.create({ name, slug, industry, status, branding_config, tools_config });
+    const tenant = tenantsRepo.create({
+      name,
+      slug,
+      industry,
+      status,
+      branding_config,
+      tools_config,
+      openrouter_api_key: typeof openrouter_api_key === "string" ? openrouter_api_key : "",
+    });
+    // upsert seeds the complete config/behavior/openrouter profiles.
     for (const agent of AGENT_IDS) agentsRepo.upsert({ tenant_id: tenant.id }, agent);
     return { tenant };
   }),
 );
 
+/** Fields a tenant update may touch — unknown keys are dropped, never applied. */
+const TENANT_PATCH_KEYS = [
+  "name",
+  "slug",
+  "industry",
+  "status",
+  "branding_config",
+  "rules",
+  "tools_config",
+  "console_config",
+  "openrouter_api_key",
+] as const;
+
 router.patch(
   "/tenants/:id",
   wrap((req) => {
-    tenantsRepo.require(req.params.id);
-    return { tenant: tenantsRepo.update(req.params.id, req.body ?? {}) };
+    const session = auth(req);
+    const id = req.params.id;
+    tenantsRepo.require(id);
+    if (session.role !== "platform_admin" && session.tenant_id !== id) {
+      throw new HttpError(403, "Access denied: that tenant is outside your workspace.");
+    }
+    const patch: Record<string, unknown> = {};
+    for (const key of TENANT_PATCH_KEYS) {
+      if (req.body?.[key] !== undefined) patch[key] = req.body[key];
+    }
+    return { tenant: tenantsRepo.update(id, patch) };
   }),
 );
 
 router.delete(
   "/tenants/:id",
   wrap((req) => {
+    requirePlatformAdmin(req);
     tenantsRepo.require(req.params.id);
     tenantsRepo.remove(req.params.id);
     return { deleted: req.params.id };
@@ -108,6 +290,10 @@ router.patch(
   "/agents/:agent",
   wrap((req) => {
     const c = ctx(req);
+    const session = auth(req);
+    if (session.role === "member") {
+      throw new HttpError(403, "Members cannot change agent configuration.");
+    }
     const agent = req.params.agent as (typeof AGENT_IDS)[number];
     if (!AGENT_IDS.includes(agent)) throw new HttpError(400, `Unknown agent: ${req.params.agent}`);
     return { agent: agentsRepo.update(c, agent, req.body ?? {}) };
@@ -139,12 +325,16 @@ router.get(
 
 /**
  * Whole-platform snapshot for the admin UI: one request instead of one per
- * tenant per table. Scoped reads still go through the per-table endpoints.
+ * tenant per table. Platform admins see every tenant; tenant users get a
+ * snapshot scoped to their own tenant — the full-platform view is admin-only.
  */
 router.get(
   "/snapshot",
-  wrap(() => {
+  wrap((req) => {
+    const session = auth(req);
     const all = tenantsRepo.list();
+    const visible =
+      session.role === "platform_admin" ? all : all.filter((t) => t.id === session.tenant_id);
     // Serialisation boundary: rows are heterogeneous across tables.
     /* eslint-disable @typescript-eslint/no-explicit-any */
     const snapshot: {
@@ -157,7 +347,7 @@ router.get(
       runs: any[];
       memory: any[];
     } = {
-      tenants: all,
+      tenants: visible,
       leads: [],
       bookings: [],
       messages: [],
@@ -166,7 +356,7 @@ router.get(
       runs: [],
       memory: [],
     };
-    for (const tenant of all) {
+    for (const tenant of visible) {
       const c = { tenant_id: tenant.id };
       snapshot.leads.push(...leadsRepo.list(c));
       snapshot.bookings.push(...bookingsRepo.list(c));
@@ -359,6 +549,10 @@ router.post(
   "/agents/:agent/enabled",
   wrap((req) => {
     const c = ctx(req);
+    const session = auth(req);
+    if (session.role === "member") {
+      throw new HttpError(403, "Members cannot change agent configuration.");
+    }
     const agent = req.params.agent as (typeof AGENT_IDS)[number];
     if (!AGENT_IDS.includes(agent)) throw new HttpError(400, `Unknown agent: ${req.params.agent}`);
     return { agent: agentsRepo.setEnabled(c, agent, Boolean(req.body?.enabled)) };
@@ -412,8 +606,12 @@ router.get(
 router.get(
   "/agents/runs/:id",
   wrap((req) => {
+    const session = auth(req);
     const run = runsRepo.get(req.params.id);
     if (!run) throw new HttpError(404, `Agent run not found: ${req.params.id}`);
+    if (session.role !== "platform_admin" && run.tenant_id !== session.tenant_id) {
+      throw new HttpError(404, `Agent run not found: ${req.params.id}`);
+    }
     return { run };
   }),
 );
@@ -469,10 +667,11 @@ router.get(
 /* tools                                                               */
 /* ------------------------------------------------------------------ */
 
-/** Rebuild demo data. Admin-only maintenance route. */
+/** Rebuild demo data. Platform-admin-only maintenance route. */
 router.post(
   "/admin/reset",
-  wrap(() => {
+  wrap((req) => {
+    requirePlatformAdmin(req);
     resetDatabase();
     seedIfEmpty();
     return { ok: true, tenants: tenantsRepo.list().length };

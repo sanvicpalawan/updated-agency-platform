@@ -22,6 +22,8 @@ export interface Tenant {
   rules: Record<AgentId, string>;
   tools_config: Record<string, unknown>;
   console_config: Record<string, unknown>;
+  /** Workspace-level OpenRouter key inherited by every agent unless overridden. */
+  openrouter_api_key: string;
   created_at: string;
 }
 
@@ -90,9 +92,27 @@ export interface AgentConfigRow {
   enabled: boolean;
   config: Record<string, unknown>;
   behavior: Record<string, unknown>;
+  /** Per-agent OpenRouter profile (model, temperature, key override, …). */
+  openrouter: Record<string, unknown>;
   actions_completed: number;
   last_action: string;
   last_active_at: string | null;
+}
+
+/* ------------------------------------------------------------------ */
+/* auth                                                                */
+/* ------------------------------------------------------------------ */
+
+export type SessionRole = "platform_admin" | "tenant_admin" | "member";
+
+/** A verified session attached to the request by the auth middleware. */
+export interface AuthSession {
+  user_id: string;
+  name: string;
+  email: string;
+  role: SessionRole;
+  /** null for platform admins — they are not bound to one tenant. */
+  tenant_id: string | null;
 }
 
 export interface ToolCallRecord {

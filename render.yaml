@@ -1,0 +1,25 @@
+# Render blueprint — one long-lived web service for API + frontend.
+# The SQLite file must live on the attached disk, or data resets on deploy.
+services:
+  - type: web
+    name: core-agent-platform
+    runtime: docker
+    plan: starter
+    dockerfilePath: Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: DB_PATH
+        value: /data/core.sqlite
+      - key: PORT
+        value: "10000"
+      - key: HOST
+        value: 0.0.0.0
+      # Optional — route NYX/TALA through OpenRouter:
+      # - key: AGENT_LLM_PROVIDER
+      #   value: openrouter
+      # - key: OPENROUTER_API_KEY
+      #   sync: false
+    disk:
+      name: core-data
+      mountPath: /data
+      sizeGB: 1

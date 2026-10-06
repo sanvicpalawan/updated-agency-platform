@@ -71,6 +71,15 @@ records which one produced each result, so a run is always attributable.
 No agent code or schema changes are needed to switch — that is the point of the
 seam. **Nothing in this build calls an external network endpoint by default.**
 
+### Verification status of the OpenRouter path
+
+The adapter has been exercised end-to-end against a **local
+OpenRouter-compatible mock** (`test/e2e.test.ts`, phase C): request shape,
+bearer header, JSON-mode parsing, score clamping, and the `usage →
+agent_runs.tokens_in / tokens_out / cost_usd / model_id` mapping are all
+asserted. It has **not yet run against a live openrouter.ai model** (the build
+sandboxes have no egress there); that is the remaining unverified mile.
+
 ## Tool layer
 
 | Tool | Behaviour |
@@ -83,12 +92,35 @@ seam. **Nothing in this build calls an external network endpoint by default.**
 Only tools mutate outbound state. Each execution returns a record that lands in
 `agent_runs.tool_calls`, including failures.
 
-## Tenant scoping
+## Authentication & tenant scoping
 
-Every route resolves `tenant_id` and rejects `all`. Record reads are
-`WHERE id = ? AND tenant_id = ?`; a foreign ID is a 404, not a 403 leak.
-`GET /api/snapshot` returns the whole platform for the admin UI, which is
-deliberately an admin-only surface — it is not scoped.
+`POST /api/auth/login` (email + scrypt-hashed password) issues a bearer token;
+only its SHA-256 hash is stored (`sessions` table, 7-day TTL). Every route
+except `/api/health` and `/api/auth/login` requires the token.
+
+- **platform_admin** — users with no tenant. May address any tenant; sees the
+  whole-platform snapshot.
+- **tenant_admin / member** — pinned to the tenant on their session. A
+  `tenant_id` anywhere else is a 403; the client-supplied value is never
+  trusted on its own. Their snapshot is scoped to their own tenant.
+
+Record reads remain `WHERE id = ? AND tenant_id = ?`; a foreign ID is a 404,
+not a leak. Tenant creation/deletion and `POST /api/admin/reset` are
+platform-admin-only.
+
+## Schema versioning & migrations
+
+`SCHEMA_SQL` always describes the latest shape (fresh installs). Existing
+databases are upgraded by the ordered `MIGRATIONS` array in `db/schema.ts`,
+applied transactionally by `db/connection.ts`:
+
+| v | Change |
+|---|---|
+| 2 | `tenants.openrouter_api_key`, `agents.openrouter` (the da39f3c persistence fix) |
+| 3 | auth: `users.password_hash`, nullable `users.tenant_id` (table rebuild), `sessions` |
+
+The recorded version lives in `schema_meta`; a newer database than the runtime
+refuses to start instead of being half-read.
 
 ## Running it
 
@@ -104,9 +136,36 @@ npm install
 npm run dev            # http://localhost:5173
 ```
 
-`npm run verify` in `server/` boots a throwaway SQLite file and drives the real
-API over HTTP — 61 assertions covering the pipeline, audit trail, memory, tools,
-gates, scoping, and persistence across a restart.
+`npm run verify` in `server/` boots throwaway SQLite files and drives the real
+API over HTTP — 119 assertions covering the auth gate, pipeline, audit trail,
+memory, tools, gates, scoping/authorization, config persistence (read-back),
+the v1→v3 schema migration, a restart, and the LLM seam against a local
+OpenRouter-compatible mock. `npm run verify:config` in `live-agent-system/`
+covers the frontend agent-profile merge logic.
+
+## Deployment
+
+The runner drains its queue inside the HTTP process and SQLite needs a durable
+file, so the deployment unit is **one long-lived Node process serving both the
+API and the built frontend** (`src/index.ts` serves `live-agent-system/dist`
+with an SPA fallback whenever it exists). Plain serverless functions cannot
+host this shape: no durable disk, no process lifetime.
+
+Shipped artifacts: `Dockerfile` (repo root, multi-stage: frontend bundle →
+backend compile → slim runtime), `railway.json`, `render.yaml`. Requirements on
+the host:
+
+1. Node ≥ 22.5 (for `node:sqlite`).
+2. A persistent volume mounted at `/data` (`DB_PATH=/data/core.sqlite`).
+   Without it the database resets on every redeploy.
+3. Set `SEED_DEMO_PASSWORD` / rotate the seeded demo accounts before exposing
+   the service (see SECURITY.md).
+4. Optional: `AGENT_LLM_PROVIDER=openrouter` + `OPENROUTER_API_KEY`.
+
+Tradeoff note: a serverless (Vercel-style) host would additionally require
+swapping SQLite for a hosted Postgres and a request-scoped/cron runner — the
+Postgres swap is designed (see below) but not done. The process-host shape
+ships everything that exists today without code changes.
 
 ## Swapping SQLite for Postgres
 
@@ -117,12 +176,14 @@ module that knows the driver. Nothing above the repo layer changes.
 
 ## Known limits
 
-- **No authentication.** `MOCK_ADMIN` is still a hardcoded client identity; the
-  backend trusts whatever `tenant_id` it is given. Real auth must sit in front
-  of `/api` before this is exposed.
+- **Demo credentials.** Seeded accounts share a published password (see
+  SECURITY.md); there is no change-password flow yet.
+- **OpenRouter keys at rest are plaintext** in SQLite.
 - **Transport stubs.** WhatsApp and email write records; they do not deliver.
 - **Synchronous pipeline.** `POST /api/events` drains inline so the caller sees
   the result. Long workflows will need a real worker and a 202 response.
 - **No transactions across the pipeline.** A failed tool leaves earlier state
   changes applied; the failure is recorded rather than rolled back.
+- **LLM path verified against a mock endpoint only** — not yet against a live
+  openrouter.ai model (no egress from the build sandboxes).
 - `node:sqlite` is flagged experimental in Node 22.

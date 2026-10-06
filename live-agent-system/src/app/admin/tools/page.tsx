@@ -23,15 +23,15 @@ import {
   AGENTS,
   AGENT_IDS,
   createDefaultToolsConfig,
-  DEFAULT_AGENT_BEHAVIOR,
-  DEFAULT_AGENT_OPENROUTER,
+  mergeBehavior,
+  mergeOpenRouter,
   TOOL_IDS,
 } from "../../../config/platform";
+import { db } from "../../../services/db";
 import type { AgentId, Tenant, ToolId, ToolSetting } from "../../../types/database";
 import { useAdmin, useTenantTarget } from "../AdminContext";
 import {
   AgentMark,
-  EmptyState,
   Modal,
   PageHeader,
   SectionHeading,
@@ -39,6 +39,7 @@ import {
   TenantMark,
   TenantSelect,
   Toggle,
+  WorkspaceGate,
 } from "../components/shared";
 import { csv, download, errorMessage, fullDate, money, number, relative } from "../utils";
 
@@ -76,8 +77,8 @@ export default function ToolsPage() {
         agent: a.agent,
         enabled: a.enabled,
         rule: target.rules[a.agent],
-        openrouter: a.openrouter ?? DEFAULT_AGENT_OPENROUTER[a.agent],
-        behavior: a.behavior ?? DEFAULT_AGENT_BEHAVIOR[a.agent],
+        openrouter: mergeOpenRouter(a.agent, a.openrouter),
+        behavior: mergeBehavior(a.agent, a.behavior),
         parameters: a.config,
       })),
       tools: Object.values(tools),
@@ -104,7 +105,8 @@ export default function ToolsPage() {
       </PageHeader>
 
       {!target || !scoped || !tools ? (
-        <EmptyState
+        <WorkspaceGate
+          onRetry={() => void db.load(true).catch(() => undefined)}
           title="No workspace selected"
           description="Create a tenant to configure its tools and share client outcomes."
           action={

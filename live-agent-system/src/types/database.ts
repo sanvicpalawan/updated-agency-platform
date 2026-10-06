@@ -90,7 +90,7 @@ export interface Tenant {
 export interface Session {
   user_id: string;
   name: string;
-  role: "platform_admin" | "tenant_admin";
+  role: "platform_admin" | "tenant_admin" | "member";
   tenant_id: string | null;
 }
 

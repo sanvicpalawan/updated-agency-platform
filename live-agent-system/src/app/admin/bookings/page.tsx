@@ -273,9 +273,10 @@ export default function BookingsPage() {
             <button
               className="button danger small"
               onClick={() => {
-                if (act(() => bookingsApi.remove(session, selected.tenant_id, selected.id), `Booking ${selected.reference} deleted.`)) {
-                  setSelectedId(null);
-                }
+                void act(
+                  () => bookingsApi.remove(session, selected.tenant_id, selected.id),
+                  `Booking ${selected.reference} deleted.`,
+                ).then((ok) => { if (ok) setSelectedId(null); });
               }}
             >
               <Trash2 size={13} />

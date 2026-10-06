@@ -20,10 +20,11 @@ import {
   AGENTS,
   AGENT_IDS,
   createDefaultToolsConfig,
-  DEFAULT_AGENT_BEHAVIOR,
-  DEFAULT_AGENT_OPENROUTER,
+  mergeBehavior,
+  mergeOpenRouter,
   TOOL_IDS,
 } from "../../../config/platform";
+import { db } from "../../../services/db";
 import { findModel, useOpenRouterCatalog } from "../../../services/openrouter";
 import { ModelPicker, ModelSyncStatus, SyncDot } from "../components/OpenRouterSync";
 import type {
@@ -40,7 +41,6 @@ import type {
 import { useAdmin, useTenantTarget } from "../AdminContext";
 import {
   AgentMark,
-  EmptyState,
   EventFeed,
   Modal,
   PageHeader,
@@ -48,6 +48,7 @@ import {
   Status,
   TenantSelect,
   Toggle,
+  WorkspaceGate,
 } from "../components/shared";
 import { errorMessage, number, relative } from "../utils";
 
@@ -89,7 +90,8 @@ export default function AgentsPage() {
       </PageHeader>
 
       {!target || !scoped || !tools ? (
-        <EmptyState
+        <WorkspaceGate
+          onRetry={() => void db.load(true).catch(() => undefined)}
           title="No workspaces yet"
           description="Create a tenant to configure its agents, OpenRouter models, and behavioral settings."
           action={
@@ -184,8 +186,10 @@ export default function AgentsPage() {
               const config = scoped.agents.find((a) => a.agent === id);
               if (!config) return null;
               const active = config.enabled && target.status === "active";
-              const orConfig = config.openrouter ?? DEFAULT_AGENT_OPENROUTER[id];
-              const behavior = config.behavior ?? DEFAULT_AGENT_BEHAVIOR[id];
+              // Merge over defaults field-by-field: the backend may return a
+              // partial or empty profile, and `?? DEFAULT` never fires for {}.
+              const orConfig = mergeOpenRouter(id, config.openrouter);
+              const behavior = mergeBehavior(id, config.behavior);
               const modelObj = findModel(catalog.models, orConfig.model_id);
               const hasKey = Boolean(orConfig.api_key || target.openrouter_api_key);
 
@@ -386,18 +390,16 @@ export function AgentSettingsModal({
 }) {
   const { session } = useAdmin();
   const [tab, setTab] = useState<"openrouter" | "behavior" | "json">(initialTab);
-  const [orDraft, setOrDraft] = useState<AgentOpenRouterConfig>(() => ({
-    ...DEFAULT_AGENT_OPENROUTER[config.agent],
-    ...(config.openrouter ?? {}),
-  }));
-  const [behDraft, setBehDraft] = useState<AgentBehaviorConfig>(() => ({
-    ...DEFAULT_AGENT_BEHAVIOR[config.agent],
-    ...(config.behavior ?? {}),
-    connected_tools: [...(config.behavior?.connected_tools ?? DEFAULT_AGENT_BEHAVIOR[config.agent].connected_tools)],
-  }));
+  const [orDraft, setOrDraft] = useState<AgentOpenRouterConfig>(() =>
+    mergeOpenRouter(config.agent, config.openrouter),
+  );
+  const [behDraft, setBehDraft] = useState<AgentBehaviorConfig>(() =>
+    mergeBehavior(config.agent, config.behavior),
+  );
   const [jsonDraft, setJsonDraft] = useState(() => JSON.stringify(config.config, null, 2));
   const [showKey, setShowKey] = useState(false);
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
   const catalog = useOpenRouterCatalog();
 
   const selectedModel = findModel(catalog.models, orDraft.model_id);
@@ -421,11 +423,23 @@ export function AgentSettingsModal({
     }));
   };
 
-  const saveAll = () => {
+  /**
+   * Await the server before claiming success (part of the da39f3c act() fix):
+   * the modal only closes and the success toast only fires once the backend
+   * has actually persisted the profile; a rejection renders inline instead.
+   */
+  const saveAll = async () => {
     setError("");
+    let parsedJson;
     try {
-      const parsedJson = validateAgentConfig(config.agent, JSON.parse(jsonDraft));
-      agentsApi.update(session, tenant.id, config.agent, {
+      parsedJson = validateAgentConfig(config.agent, JSON.parse(jsonDraft));
+    } catch (err) {
+      setError(errorMessage(err));
+      return;
+    }
+    setSaving(true);
+    try {
+      await agentsApi.update(session, tenant.id, config.agent, {
         openrouter: orDraft,
         behavior: behDraft,
         config: parsedJson,
@@ -434,6 +448,8 @@ export function AgentSettingsModal({
       onClose();
     } catch (err) {
       setError(errorMessage(err));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -701,9 +717,9 @@ export function AgentSettingsModal({
         <button className="button secondary" onClick={onClose}>
           Cancel
         </button>
-        <button className="button primary" onClick={saveAll}>
+        <button className="button primary" onClick={() => void saveAll()} disabled={saving}>
           <Check size={14} />
-          Save agent settings
+          {saving ? "Saving…" : "Save agent settings"}
         </button>
       </div>
     </Modal>

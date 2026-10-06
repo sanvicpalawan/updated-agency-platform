@@ -1,12 +1,13 @@
 /**
- * Tenant isolation self-test.
+ * Tenant isolation self-test (client-side guards).
  *
  * Runs the app's own `runIsolationChecks()` outside the browser so CI fails if
- * tenant scoping ever regresses. `db.ts` persists to localStorage, so we shim
- * a minimal in-memory implementation before importing.
+ * client-side tenant scoping regresses. Server-side enforcement (the real
+ * control) is exercised by `server/test/e2e.test.ts` — see SECURITY.md.
  *
- * NOTE: these checks assert *client-side* scoping only. They are a regression
- * guard, not a security control — see SECURITY.md.
+ * Setup: an authenticated platform-admin session is staged in the localStorage
+ * shim, and `fetch` is stubbed so `db.load()` receives a snapshot containing
+ * two tenants — no network, no server needed.
  */
 
 class MemoryStorage {
@@ -27,7 +28,7 @@ class MemoryStorage {
     return Array.from(this.map.keys())[index] ?? null;
   }
   get length() {
-    return this.map.size;
+    return Array.from(this.map.keys()).length;
   }
 }
 
@@ -35,18 +36,44 @@ const store = new MemoryStorage();
 Object.defineProperty(globalThis, "localStorage", { value: store, configurable: true });
 Object.defineProperty(globalThis, "window", { value: globalThis, configurable: true });
 
+/* Stage a platform-admin session BEFORE the auth module initializes. */
+store.setItem(
+  "core.auth.v1",
+  JSON.stringify({
+    token: "selftest-token",
+    session: { user_id: "selftest", name: "Self Test", role: "platform_admin", tenant_id: null },
+  }),
+);
+
+/* Two fake tenants with one lead each, served by the stubbed fetch. */
+const TENANTS = [
+  { id: "t-one", name: "One", slug: "one", industry: "", status: "active", branding_config: { app_name: "One", logo: "O", primary_color: "#bcf58b", theme: "dark" }, rules: { tala: "auto-reply-leads", nyx: "follow-up-after-24h", hermes: "log-all-bookings" }, openrouter_api_key: "", created_at: new Date().toISOString() },
+  { id: "t-two", name: "Two", slug: "two", industry: "", status: "active", branding_config: { app_name: "Two", logo: "T", primary_color: "#8ccbee", theme: "dark" }, rules: { tala: "auto-reply-leads", nyx: "follow-up-after-24h", hermes: "log-all-bookings" }, openrouter_api_key: "", created_at: new Date().toISOString() },
+];
+const LEADS = [
+  { id: "l-one", tenant_id: "t-one", name: "Lead One", email: "", channel: "Website", status: "new", assigned_agent: "tala", score: 0, inquiry: "", created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+  { id: "l-two", tenant_id: "t-two", name: "Lead Two", email: "", channel: "Website", status: "new", assigned_agent: "tala", score: 0, inquiry: "", created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+];
+
+Object.defineProperty(globalThis, "fetch", {
+  configurable: true,
+  value: async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/api/snapshot")) {
+      return new Response(
+        JSON.stringify({ tenants: TENANTS, leads: LEADS, bookings: [], messages: [], events: [], agents: [], runs: [], memory: [] }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }
+    return new Response(JSON.stringify({ error: "unexpected request in self-test" }), { status: 500 });
+  },
+});
+
 async function main() {
-  const { runIsolationChecks } = await import("../src/core/isolationChecks");
-  const { MOCK_ADMIN } = await import("../src/config/platform");
   const { db } = await import("../src/services/db");
+  await db.load();
 
-  // Ensure there is at least one tenant to scope against.
-  const tenants = db.listTenants(MOCK_ADMIN);
-  if (!tenants.length) {
-    console.error("FAIL: no tenants seeded — isolation checks cannot run.");
-    process.exit(1);
-  }
-
+  const { runIsolationChecks } = await import("../src/core/isolationChecks");
   const results = runIsolationChecks();
   let failed = 0;
 

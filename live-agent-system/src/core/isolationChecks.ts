@@ -1,4 +1,4 @@
-import { MOCK_ADMIN } from "../config/platform";
+import { requireSession } from "../services/auth";
 import { db } from "../services/db";
 import { resolveTenant } from "./tenantResolver";
 
@@ -12,12 +12,12 @@ export function runIsolationChecks(): IsolationCheck[] {
     catch (error) { checks.push({ name, passed: false, note: error instanceof Error ? error.message : "Check failed" }); }
   };
   const denied = (action: () => unknown) => { try { action(); return false; } catch { return true; } };
-  check("Unscoped requests are rejected", () => denied(() => resolveTenant(MOCK_ADMIN, "")));
-  check("Global scope cannot write tenant records", () => denied(() => resolveTenant(MOCK_ADMIN, "all")));
-  const tenants = db.listTenants(MOCK_ADMIN);
+  check("Unscoped requests are rejected", () => denied(() => resolveTenant(requireSession(), "")));
+  check("Global scope cannot write tenant records", () => denied(() => resolveTenant(requireSession(), "all")));
+  const tenants = db.listTenants(requireSession());
   if (tenants.length) {
     const own = tenants[0];
-    const context = resolveTenant(MOCK_ADMIN, own.id);
+    const context = resolveTenant(requireSession(), own.id);
     check("Every record table is tenant-filtered", () => (["leads", "bookings", "messages", "users", "events", "agents"] as const).every((table) => db.forTenant(context).list(table).every((row) => row.tenant_id === own.id)));
     check("Read results cannot mutate stored branding", () => {
       const snapshot = db.getTenant(context);
@@ -27,7 +27,7 @@ export function runIsolationChecks(): IsolationCheck[] {
     const other = tenants.find((tenant) => tenant.id !== own.id);
     if (other) {
       check("Tenant members cannot switch workspaces", () => denied(() => resolveTenant({ user_id: "mock-member", name: "Member", role: "tenant_admin", tenant_id: own.id }, other.id)));
-      const foreign = db.forTenant(resolveTenant(MOCK_ADMIN, other.id)).list("leads")[0];
+      const foreign = db.forTenant(resolveTenant(requireSession(), other.id)).list("leads")[0];
       if (foreign) check("Foreign record IDs cannot be read", () => denied(() => db.forTenant(context).get("leads", foreign.id)));
     }
   }

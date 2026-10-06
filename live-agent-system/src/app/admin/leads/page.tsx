@@ -343,9 +343,10 @@ export default function LeadsPage() {
             <button
               className="button danger small"
               onClick={() => {
-                if (act(() => leadsApi.remove(session, selected.tenant_id, selected.id), `Lead ${selected.name} deleted.`)) {
-                  setSelectedId(null);
-                }
+                void act(
+                  () => leadsApi.remove(session, selected.tenant_id, selected.id),
+                  `Lead ${selected.name} deleted.`,
+                ).then((ok) => { if (ok) setSelectedId(null); });
               }}
             >
               <Trash2 size={13} />
