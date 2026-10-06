@@ -37,8 +37,38 @@ cd live-agent-system/server && npm install && npm start      # :4100
 # 2. frontend — proxies /api to :4100
 cd live-agent-system && npm install && npm run dev           # :5173
 
-# verify the pipeline end to end (61 assertions, throwaway DB)
+# verify the pipeline end to end (119 assertions, throwaway DB)
 cd live-agent-system/server && npm run verify
+# frontend regression tests for the agent-config merge logic
+cd live-agent-system && npm run verify:config
+```
+
+### Sign in
+
+The backend issues real bearer sessions (`POST /api/auth/login`); there is no
+hardcoded client identity any more. First boot seeds demo accounts:
+
+| Account | Email | Password |
+|---|---|---|
+| Platform admin | `admin@core.local` | `core-demo-2026` |
+| Per-tenant admin | `admin@<slug>.example` (e.g. `admin@baia.example`) | `core-demo-2026` |
+
+The password is seeded, shared, and printed to the server log on first boot —
+it exists so evaluators can get in. Set `SEED_DEMO_PASSWORD` before seeding
+anything you care about, and change these accounts before exposing a deploy.
+
+### Deploy it
+
+The agent runner drains an event queue inside a long-lived HTTP process, and
+state lives in SQLite — so the deployment unit is **one Node process that
+serves both the API and the built frontend**, on a process host with a
+persistent volume. Plain serverless functions cannot host it as-is (no durable
+disk, no process lifetime). The repo ships `Dockerfile`, `railway.json`, and
+`render.yaml`; see [`live-agent-system/server/ARCHITECTURE.md`](./live-agent-system/server/ARCHITECTURE.md#deployment).
+
+```bash
+docker build -t core-agent-platform .
+docker run -p 4100:4100 -v core-data:/data core-agent-platform
 ```
 
 ---
@@ -56,15 +86,19 @@ against a persistent SQLite database.
 This is a **demonstration application**. It is excellent for previews, pitches and
 white-label handoffs. It must not hold real or sensitive data.
 
-- **No backend, no database.** Every record lives in the browser's `localStorage`.
-- **The agents are deterministic rule scripts.** They do not call a language model.
-- **Tenant isolation is client-side only.** It prevents accidental cross-tenant
-  reads in the UI. It does not prevent anyone with devtools from reading every
-  tenant's data.
-- **OpenRouter API keys entered here are stored in plaintext in the browser.**
-  Never use a production key.
-- **The WhatsApp panel is a mock.** The QR block is locally generated and is not
-  a scannable code. No message is ever sent.
+- **Real backend, seeded demo credentials.** Authentication exists (bearer
+  sessions, server-side tenant scoping), but every seeded account shares the
+  published demo password. Change them before exposing any deploy.
+- **The agents default to deterministic local strategies.** The OpenRouter LLM
+  path is implemented and verified against an OpenRouter-compatible endpoint,
+  but has not yet run against a live model — it activates only when
+  `AGENT_LLM_PROVIDER=openrouter` and `OPENROUTER_API_KEY` are set.
+- **Tenant isolation is enforced server-side.** Non-admin sessions are pinned
+  to their tenant; the whole-platform snapshot is platform-admin-only.
+- **OpenRouter API keys are stored in SQLite in plaintext.** Tenant-scoped and
+  admin-readable only — still, never use a production key.
+- **The WhatsApp/email tools are stubs.** They write real message records but
+  no message is ever transmitted anywhere.
 
 **[SECURITY.md](./SECURITY.md) has the full threat picture and the ordered list of
 what a production version needs.**
@@ -80,7 +114,7 @@ A complete business operations interface with two views in one codebase:
 | **Admin Dashboard** | `#/admin/*` | Full management: tenants, agents, leads, bookings, logs, branding, rules, settings |
 | **Operations Console** | `#/console` | Live Human / Agent dual-mode preview with boot sequence, activity stream, agent panel, control panel |
 
-Both views share the same tenant-scoped mock runtime — what you see in admin is what the console operates on.
+Both views share the same tenant-scoped backend runtime — what you see in admin is what the console operates on.
 
 ---
 
@@ -94,7 +128,7 @@ The platform ships with three purpose-built agents wired to a typed event bus an
 | **NYX** | Growth, scoring & outreach | Scores leads (deterministic rules), triggers 24h follow-ups, qualifies prospects |
 | **HERMES** | Operations & ledger sync | Confirms pending bookings, dispatches staff notifications, reconciles tenant records |
 
-**Event flow:** `API → eventBus → dispatcher → agent → scoped DB → UI subscription`. Agents never import each other. Every action is an auditable event. The simulator fires a scoped request every 18 seconds while enabled.
+**Event flow:** `POST /api/events → events table (queue) → runner.drain() → agent gate → agent decision → tools → agent_runs audit row`. Agents never import each other; they enqueue follow-on events. Every action is an auditable event. The simulator fires a scoped request every 18 seconds while enabled.
 
 | Agent | Trigger Event | Behavior |
 |---|---|---|

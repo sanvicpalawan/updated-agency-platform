@@ -1,3 +1,12 @@
-
 # Committed build artifact
 live-agent-system-landing-page.zip
+
+# Dependencies & build output
+node_modules/
+dist/
+
+# Local SQLite database (lives on a volume in production)
+live-agent-system/server/data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

@@ -1,7 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { eventsApi } from "../../api/events";
 import { getAdminData, tenantsApi } from "../../api/tenants";
-import { AGENT_IDS, MOCK_ADMIN } from "../../config/platform";
+import { AGENT_IDS } from "../../config/platform";
+import { authStore } from "../../services/auth";
 import { db } from "../../services/db";
 import type { AdminData, Session, Tenant } from "../../types/database";
 import { errorMessage, type Period } from "./utils";
@@ -37,17 +38,19 @@ interface AdminContextValue {
   notices: Notice[];
   dismissNotice: (id: number) => void;
   notify: (text: string, tone?: Notice["tone"]) => void;
-  act: (action: () => unknown, message?: string) => boolean;
+  act: (action: () => unknown, message?: string) => Promise<boolean>;
   tenantDialog: TenantDialog;
   setTenantDialog: (dialog: TenantDialog) => void;
 }
 
 const AdminContext = createContext<AdminContextValue | null>(null);
 
-function initialScope() {
+function initialScope(session: Session) {
+  // Tenant-bound users are always scoped to their own workspace.
+  if (session.role !== "platform_admin" && session.tenant_id) return session.tenant_id;
   try {
     const saved = localStorage.getItem("core.admin.scope");
-    return saved && tenantsApi.list(MOCK_ADMIN).some((t) => t.id === saved) ? saved : "all";
+    return saved && tenantsApi.list(session).some((t) => t.id === saved) ? saved : "all";
   } catch { return "all"; }
 }
 function currentPage(): AdminPage {
@@ -58,7 +61,11 @@ function currentPage(): AdminPage {
 
 export function AdminProvider({ children }: { children: ReactNode }) {
   const revision = useSyncExternalStore(db.subscribe, db.getRevision, db.getRevision);
-  const [scope, updateScope] = useState(initialScope);
+  const authed = useSyncExternalStore(authStore.subscribe, authStore.get, authStore.get);
+  // AdminProvider is only mounted behind the login gate, but a session can be
+  // revoked mid-flight (401 → clearAuth). Render nothing until re-signed-in.
+  const session = authed?.session ?? null;
+  const [scope, updateScope] = useState(() => initialScope(authed?.session ?? { user_id: "", name: "", role: "member", tenant_id: null }));
   const [page, setPage] = useState<AdminPage>(currentPage);
   const [period, setPeriod] = useState<Period>("7d");
   const [live, setLive] = useState(true);
@@ -66,8 +73,11 @@ export function AdminProvider({ children }: { children: ReactNode }) {
   const [notices, setNotices] = useState<Notice[]>([]);
   const noticeId = useRef(0);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
-  const allTenants = useMemo(() => tenantsApi.list(MOCK_ADMIN), [revision]);
-  const data = useMemo(() => getAdminData(MOCK_ADMIN, scope), [scope, revision]);
+  const allTenants = useMemo(() => (session ? tenantsApi.list(session) : []), [revision, session]);
+  const data = useMemo(
+    () => (session ? getAdminData(session, scope) : { tenants: [], leads: [], bookings: [], messages: [], events: [], agents: [] }),
+    [scope, revision, session],
+  );
   const tenant = allTenants.find((t) => t.id === scope);
 
   const notify = useCallback((text: string, tone: Notice["tone"] = "success") => {
@@ -76,23 +86,41 @@ export function AdminProvider({ children }: { children: ReactNode }) {
     timers.current.push(setTimeout(() => setNotices((current) => current.filter((notice) => notice.id !== id)), 5500));
   }, []);
 
-  const act = useCallback((action: () => unknown, message?: string): boolean => {
-    try { action(); if (message) notify(message); return true; }
-    catch (error) { notify(errorMessage(error), "error"); return false; }
+  /**
+   * Run a mutation and own its outcome. `action` may return a promise (all
+   * backend writes do) — the toast only fires AFTER the server responds, and
+   * a rejection surfaces as an error notice instead of a false success.
+   */
+  const act = useCallback(async (action: () => unknown, message?: string): Promise<boolean> => {
+    try {
+      const result = action();
+      if (result instanceof Promise) await result;
+      if (message) notify(message);
+      return true;
+    } catch (error) {
+      notify(errorMessage(error), "error");
+      return false;
+    }
   }, [notify]);
 
   const setScope = useCallback((id: string) => {
-    if (id !== "all" && !tenantsApi.list(MOCK_ADMIN).some((t) => t.id === id)) {
+    if (!session) return;
+    if (session.role !== "platform_admin" && id !== session.tenant_id) {
+      notify("Access denied: that tenant is outside your workspace.", "error");
+      return;
+    }
+    if (id !== "all" && !tenantsApi.list(session).some((t) => t.id === id)) {
       notify("This tenant is not available.", "error");
       return;
     }
     updateScope(id);
     try { localStorage.setItem("core.admin.scope", id); } catch { /* Memory-only environments are supported. */ }
-  }, [notify]);
+  }, [notify, session]);
 
   useEffect(() => {
-    if (scope !== "all" && !allTenants.some((t) => t.id === scope)) setScope("all");
-  }, [scope, allTenants, setScope]);
+    if (!session) return;
+    if (scope !== "all" && !allTenants.some((t) => t.id === scope)) setScope(session.role === "platform_admin" ? "all" : (session.tenant_id ?? "all"));
+  }, [scope, allTenants, setScope, session]);
 
   useEffect(() => {
     const handle = () => setPage(currentPage());
@@ -103,29 +131,31 @@ export function AdminProvider({ children }: { children: ReactNode }) {
   // Pull the platform snapshot on mount, then keep the cache warm so
   // backend-driven agent activity shows up without a manual refresh.
   useEffect(() => {
+    if (!session) return;
     void db.load().catch(() => undefined);
     const poll = window.setInterval(() => { void db.load(true).catch(() => undefined); }, 10_000);
     return () => { window.clearInterval(poll); timers.current.forEach(clearTimeout); };
-  }, []);
+  }, [session]);
 
   useEffect(() => {
-    if (!live) return;
+    if (!live || !session) return;
     let turn = 0;
     const timer = window.setInterval(() => {
-      const active = tenantsApi.list(MOCK_ADMIN).filter((t) => t.status === "active");
+      const active = tenantsApi.list(session).filter((t) => t.status === "active");
       if (!active.length) return;
       const selected = active[turn % active.length];
       const agent = AGENT_IDS[Math.floor(turn / active.length) % AGENT_IDS.length];
       turn += 1;
-      try { eventsApi.trigger(MOCK_ADMIN, selected.id, agent, true); }
-      catch { /* Disabled agents and empty queues are expected in the simulator. */ }
+      void eventsApi.trigger(session, selected.id, agent, true).catch(() => undefined);
     }, 18_000);
     return () => window.clearInterval(timer);
-  }, [live]);
+  }, [live, session]);
 
   const navigate = (next: AdminPage) => { window.location.hash = `/admin/${next}`; setPage(next); };
 
-  return <AdminContext.Provider value={{ session: MOCK_ADMIN, scope, setScope, allTenants, tenant, data, page, navigate, period, setPeriod, live, setLive, notices, dismissNotice: (id) => setNotices((current) => current.filter((n) => n.id !== id)), notify, act, tenantDialog, setTenantDialog }}>{children}</AdminContext.Provider>;
+  if (!session) return null;
+
+  return <AdminContext.Provider value={{ session, scope, setScope, allTenants, tenant, data, page, navigate, period, setPeriod, live, setLive, notices, dismissNotice: (id) => setNotices((current) => current.filter((n) => n.id !== id)), notify, act, tenantDialog, setTenantDialog }}>{children}</AdminContext.Provider>;
 }
 
 export function useAdmin() {

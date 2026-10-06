@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "verify:config": "tsx test/config-merge.test.ts",
+    "verify:isolation": "tsx scripts/verify-isolation.ts"
   },
   "dependencies": {
     "clsx": "2.1.1",

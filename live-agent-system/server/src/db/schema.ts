@@ -6,8 +6,16 @@
  * redesign. `node:sqlite` stores JSON as TEXT and exposes it through the
  * json1 extension, which mirrors `jsonb` closely enough for our access
  * patterns.
+ *
+ * Versioning: SCHEMA_SQL always describes the LATEST shape (used for fresh
+ * databases). Existing databases are upgraded by applying the entries of
+ * MIGRATIONS whose version is greater than the recorded schema version —
+ * see `db/connection.ts`. Migrations must be additive or table-rebuilding;
+ * they run inside a single transaction.
  */
-export const SCHEMA_VERSION = 1;
+import type { DatabaseSync } from "node:sqlite";
+
+export const SCHEMA_VERSION = 3;
 
 export const SCHEMA_SQL = `
 PRAGMA journal_mode = WAL;
@@ -19,26 +27,29 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 );
 
 CREATE TABLE IF NOT EXISTS tenants (
-  id              TEXT PRIMARY KEY,
-  name            TEXT NOT NULL,
-  slug            TEXT NOT NULL UNIQUE,
-  industry        TEXT NOT NULL DEFAULT '',
-  status          TEXT NOT NULL DEFAULT 'active'
-                    CHECK (status IN ('active','paused','setup')),
-  branding_config TEXT NOT NULL DEFAULT '{}',
-  rules           TEXT NOT NULL DEFAULT '{}',
-  tools_config    TEXT NOT NULL DEFAULT '{}',
-  console_config  TEXT NOT NULL DEFAULT '{}',
-  created_at      TEXT NOT NULL
+  id                 TEXT PRIMARY KEY,
+  name               TEXT NOT NULL,
+  slug               TEXT NOT NULL UNIQUE,
+  industry           TEXT NOT NULL DEFAULT '',
+  status             TEXT NOT NULL DEFAULT 'active'
+                       CHECK (status IN ('active','paused','setup')),
+  branding_config    TEXT NOT NULL DEFAULT '{}',
+  rules              TEXT NOT NULL DEFAULT '{}',
+  tools_config       TEXT NOT NULL DEFAULT '{}',
+  console_config     TEXT NOT NULL DEFAULT '{}',
+  openrouter_api_key TEXT NOT NULL DEFAULT '',
+  created_at         TEXT NOT NULL
 );
 
+-- tenant_id is NULL for platform-level administrators.
 CREATE TABLE IF NOT EXISTS users (
-  id         TEXT PRIMARY KEY,
-  tenant_id  TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-  name       TEXT NOT NULL,
-  email      TEXT NOT NULL,
-  role       TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin','member')),
-  created_at TEXT NOT NULL
+  id            TEXT PRIMARY KEY,
+  tenant_id     TEXT REFERENCES tenants(id) ON DELETE CASCADE,
+  name          TEXT NOT NULL,
+  email         TEXT NOT NULL UNIQUE,
+  role          TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin','member')),
+  password_hash TEXT NOT NULL DEFAULT '',
+  created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
 
@@ -98,6 +109,7 @@ CREATE TABLE IF NOT EXISTS agents (
   enabled           INTEGER NOT NULL DEFAULT 1,
   config            TEXT NOT NULL DEFAULT '{}',
   behavior          TEXT NOT NULL DEFAULT '{}',
+  openrouter        TEXT NOT NULL DEFAULT '{}',
   actions_completed INTEGER NOT NULL DEFAULT 0,
   last_action       TEXT NOT NULL DEFAULT 'Awaiting first request',
   last_active_at    TEXT,
@@ -173,4 +185,76 @@ CREATE TABLE IF NOT EXISTS agent_memory (
 );
 CREATE INDEX IF NOT EXISTS idx_memory_lookup
   ON agent_memory(tenant_id, scope, subject_id);
+
+-- Bearer sessions issued by POST /api/auth/login. Only the SHA-256 hash of
+-- the token is stored; the raw token exists only on the client.
+CREATE TABLE IF NOT EXISTS sessions (
+  token_hash   TEXT PRIMARY KEY,
+  user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  tenant_id    TEXT REFERENCES tenants(id) ON DELETE CASCADE,
+  role         TEXT NOT NULL CHECK (role IN ('platform_admin','tenant_admin','member')),
+  created_at   TEXT NOT NULL,
+  expires_at   TEXT NOT NULL,
+  last_seen_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 `;
+
+export interface Migration {
+  version: number;
+  description: string;
+  up: (db: DatabaseSync) => void;
+}
+
+/**
+ * Ordered upgrade steps from older schema versions. Applied transactionally
+ * by `db/connection.ts` when the recorded version is behind SCHEMA_VERSION.
+ */
+export const MIGRATIONS: Migration[] = [
+  {
+    // Fix from da39f3c: tenants.openrouter_api_key + agents.openrouter had no
+    // columns, so saves returned HTTP 200 and silently dropped the value.
+    version: 2,
+    description: "openrouter persistence: tenants.openrouter_api_key, agents.openrouter",
+    up(db) {
+      db.exec(`ALTER TABLE tenants ADD COLUMN openrouter_api_key TEXT NOT NULL DEFAULT ''`);
+      db.exec(`ALTER TABLE agents ADD COLUMN openrouter TEXT NOT NULL DEFAULT '{}'`);
+    },
+  },
+  {
+    // Authentication: nullable users.tenant_id (platform admins), password
+    // hashes, and the bearer sessions table. SQLite cannot drop a NOT NULL
+    // constraint, so the users table is rebuilt.
+    version: 3,
+    description: "auth: users.password_hash, nullable users.tenant_id, sessions table",
+    up(db) {
+      db.exec(`
+        CREATE TABLE users_new (
+          id            TEXT PRIMARY KEY,
+          tenant_id     TEXT REFERENCES tenants(id) ON DELETE CASCADE,
+          name          TEXT NOT NULL,
+          email         TEXT NOT NULL UNIQUE,
+          role          TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin','member')),
+          password_hash TEXT NOT NULL DEFAULT '',
+          created_at    TEXT NOT NULL
+        );
+        INSERT INTO users_new (id, tenant_id, name, email, role, password_hash, created_at)
+          SELECT id, tenant_id, name, email, role, '', created_at FROM users;
+        DROP TABLE users;
+        ALTER TABLE users_new RENAME TO users;
+        CREATE INDEX idx_users_tenant ON users(tenant_id);
+
+        CREATE TABLE IF NOT EXISTS sessions (
+          token_hash   TEXT PRIMARY KEY,
+          user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          tenant_id    TEXT REFERENCES tenants(id) ON DELETE CASCADE,
+          role         TEXT NOT NULL CHECK (role IN ('platform_admin','tenant_admin','member')),
+          created_at   TEXT NOT NULL,
+          expires_at   TEXT NOT NULL,
+          last_seen_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+      `);
+    },
+  },
+];

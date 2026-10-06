@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowDown, ArrowUpRight, Check, ChevronDown, Copy, Inbox, X } from "lucide-react";
 import { AGENTS } from "../../../config/platform";
+import { useDbStatus } from "../../../services/useDbStatus";
 import type { AgentId, SystemEvent, Tenant } from "../../../types/database";
 import { cn } from "../../../utils/cn";
 import { useAdmin } from "../AdminContext";
@@ -36,6 +37,31 @@ export function SectionHeading({ title, description, action }: { title: ReactNod
 
 export function EmptyState({ title = "No records found", description = "Try a different filter or add your first record.", action }: { title?: string; description?: string; action?: ReactNode }) {
   return <div className="admin-empty"><Inbox size={27} strokeWidth={1.3}/><h3>{title}</h3><p>{description}</p>{action}</div>;
+}
+
+/**
+ * Three distinct "nothing to show" states (fix from da39f3c):
+ *   loading  → the snapshot fetch is still in flight
+ *   error    → the backend is unreachable / rejected the session
+ *   ready    → there genuinely are no workspaces yet
+ * Collapsing all three into the empty state made pages claim "No workspaces"
+ * during every initial load, before db.load() had resolved.
+ */
+export function WorkspaceGate({ title, description, action, onRetry }: { title?: string; description?: string; action?: ReactNode; onRetry?: () => void }) {
+  const { status, error } = useDbStatus();
+  if (status === "idle" || status === "loading") {
+    return <EmptyState title="Loading workspaces…" description="Fetching the platform snapshot from the backend." />;
+  }
+  if (status === "error") {
+    return (
+      <EmptyState
+        title="Backend unreachable"
+        description={`The agent runtime did not return a snapshot. ${error ?? ""}`.trim()}
+        action={onRetry ? <button className="button secondary" onClick={onRetry}>Retry connection</button> : action}
+      />
+    );
+  }
+  return <EmptyState title={title ?? "No workspaces yet"} description={description ?? "Create a tenant to get started."} action={action} />;
 }
 
 export function Toggle({ checked, onChange, label, disabled = false }: { checked: boolean; onChange: (value: boolean) => void; label: string; disabled?: boolean }) {

@@ -8,7 +8,9 @@ export function requireAdmin(session: Session): void {
 
 export function resolveTenant(session: Session, tenant_id: string): TenantContext {
   if (!session.user_id) throw new Error("An active session is required.");
-  if (!["platform_admin", "tenant_admin"].includes(session.role)) throw new Error("Unrecognized session role.");
+  if (!["platform_admin", "tenant_admin", "member"].includes(session.role)) {
+    throw new Error("Unrecognized session role.");
+  }
   if (!tenant_id || tenant_id === "all") throw new Error("Select a specific tenant before performing this action.");
   if (session.role !== "platform_admin" && session.tenant_id !== tenant_id) {
     throw new Error("Access denied: this tenant is outside your workspace.");

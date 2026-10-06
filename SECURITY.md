@@ -2,73 +2,87 @@
 
 ## What this application is
 
-CORE is a **client-side demonstration application**. It has no backend, no
-database and no server. Every record it shows — tenants, leads, bookings,
-messages, events — lives in the browser's `localStorage`. The three agents
-(TALA, NYX, HERMES) are deterministic rule scripts, not live LLM calls.
+CORE is a multi-tenant operations platform: a React frontend and an
+Express + SQLite (`node:sqlite`) backend in `live-agent-system/server`. Three
+agents (TALA, NYX, HERMES) run server-side against a persistent database; every
+execution is audited in `agent_runs`. WhatsApp/email tools are stubs — they
+write records but transmit nothing.
 
-It is built to be white-labeled and shipped as a single self-contained HTML
-file. That is a deliberate product decision, not an oversight.
+## Authentication & authorization model
 
-## Do not put real or sensitive data in this build
+- `POST /api/auth/login` exchanges email + password for a bearer token.
+  Passwords are hashed with scrypt (salted, constant-time compare). Only the
+  SHA-256 hash of a session token is stored; tokens expire after 7 days.
+  A small in-memory lockout throttles repeated failed logins per email.
+- Every other `/api` route requires `Authorization: Bearer <token>`
+  (`/api/health` and `/api/auth/login` are the only public endpoints).
+- Roles: **platform_admin** (users with no tenant), **tenant_admin** and
+  **member** (bound to one tenant). Non-admin sessions are *pinned* to their
+  tenant server-side — a `tenant_id` pointing anywhere else is a 403, never
+  trusted. `GET /api/snapshot` returns the whole platform for platform admins
+  only; tenant users receive a snapshot scoped to their own tenant.
+- Writes: tenants can only be created/deleted by platform admins; agent
+  configuration requires tenant_admin or platform_admin.
 
-This is the single most important line in this document.
+The hardcoded `MOCK_ADMIN` client identity was deleted. The e2e suite asserts
+all of the above (401s, cross-tenant 403s, scoped snapshots).
 
-Tenant isolation is enforced **in JavaScript, on the client**. That means:
+## Demo credentials — the known weak point
 
-- Anyone with browser devtools can read every tenant's leads, bookings and
-  messages. Tenant scoping in `src/core/tenantResolver.ts` and
-  `src/services/db.ts` prevents accidental cross-tenant reads inside the UI; it
-  does **not** prevent deliberate access.
-- Per-tenant OpenRouter API keys (`openrouter_api_key`) are persisted to
-  `localStorage` in plaintext. They are readable by anyone with access to the
-  browser profile, and are included in any profile export.
-- The build inlines the entire application — including that key field — into a
-  single `dist/index.html` via `vite-plugin-singlefile`.
+First boot seeds:
 
-Never use a production OpenRouter key here. Use a scoped, low-limit key that you
-are willing to rotate.
+| Account | Email | Password |
+|---|---|---|
+| Platform admin | `admin@core.local` | `core-demo-2026` |
+| Per-tenant admin | `admin@<slug>.example` | `core-demo-2026` |
+
+The password is published in this document, printed to the server log, and
+shown on the login screen. That is a deliberate demo trade-off. Before any
+non-local exposure: set `SEED_DEMO_PASSWORD`, rotate/delete the seeded
+accounts, and enforce your own password policy. There is currently no
+change-password endpoint.
+
+## Data protection status
+
+- **OpenRouter API keys are stored in SQLite in plaintext**
+  (`tenants.openrouter_api_key`, `agents.openrouter.api_key`). They are only
+  readable with an authenticated admin session for that tenant, but anyone with
+  the database file can read them. Use scoped, low-limit keys you can rotate.
+- Session tokens are stored hashed; a leaked database does not leak sessions.
+- The SQLite file must live on a persistent volume in production; it is the
+  entire system of record.
+
+## Known gaps (in priority order)
+
+1. **No per-user password management** (change/reset) beyond re-seeding.
+2. **OpenRouter keys at rest are unencrypted** — consider envelope encryption
+   or a secret manager before real customer keys.
+3. **Login throttling is per-process memory** — resets on restart and does not
+   span multiple instances.
+4. **No CSP/security headers** on the served frontend yet.
+5. **whatsapp.send / email.send are stubs** — wiring real transports must
+   include per-tenant credential isolation.
+6. `node:sqlite` is experimental in Node 22 (works, but pin the Node version).
 
 ## The WhatsApp panel is a mock
 
 `src/components/overlays/WhatsAppConnect.tsx` renders a QR-like block that is
 **generated locally from a PRNG and is not a scannable device-link code**. No
-WhatsApp credentials are exchanged and no message ever leaves the browser. The UI
-states this in-app; the statement is accurate.
+WhatsApp credentials are exchanged and no message ever leaves the system.
 
 ## Isolation checks are a regression guard, not a control
 
-`src/core/isolationChecks.ts` verifies client-side tenant scoping. It is now run
-in CI via `scripts/verify-isolation.ts`. Treat a green run as "the scoping logic
-did not regress" — never as "the data is secure."
+`src/core/isolationChecks.ts` verifies client-side scoping conveniences. The
+actual enforcement is server-side (see model above) and exercised by
+`live-agent-system/server/test/e2e.test.ts`.
 
 ## Open dependency advisory
 
 `npm audit` reports 3 high-severity advisories in the transitive chain
 `vite-plugin-singlefile → micromatch → braces` (stack-exhaustion DoS via deeply
-nested glob patterns).
-
-This is **build-time only**. The app performs no glob processing on
-user-supplied input at runtime. The only fix npm offers is
-`--force`, which downgrades `vite-plugin-singlefile` to `0.9.0` — a breaking
-change that removes the single-file output this product is built around. We
-accept the advisory deliberately rather than break the deliverable.
-
-## Hardening checklist
-
-The current open items, in priority order:
-
-1. **Backend.** Move records out of `localStorage` into a real datastore with
-   server-side authorization. This is the only change that makes tenant
-   isolation meaningful.
-2. **API keys.** Stop persisting OpenRouter keys in `localStorage`. Proxy model
-   calls through a server that holds the key and returns only completions.
-3. **Authentication.** There is none. `MOCK_ADMIN` in `src/config/platform.ts`
-   is a hardcoded session. Any real deployment needs real login before any of
-   the above matters.
-4. **Content-Security-Policy.** Add a CSP header on deploy so a future
-   `dangerouslySetInnerHTML` or injected script cannot exfiltrate local data.
-5. **Rotate any key ever entered into a demo build.**
+nested glob patterns). This is **build-time only**. The app performs no glob
+processing on user-supplied input at runtime. We accept the advisory
+deliberately rather than break the single-file build output.
 
 ## Reporting
 

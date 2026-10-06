@@ -8,20 +8,23 @@
  */
 import { randomUUID } from "node:crypto";
 import { db, resetDatabase } from "./connection.ts";
+import { hashPassword } from "../auth/passwords.ts";
+import {
+  DEFAULT_AGENT_BEHAVIOR,
+  DEFAULT_AGENT_CONFIG,
+  DEFAULT_AGENT_OPENROUTER,
+} from "../config/agentDefaults.ts";
 
 const AGENTS = ["tala", "nyx", "hermes"] as const;
 
-const DEFAULT_CONFIG: Record<string, Record<string, unknown>> = {
-  tala: { auto_reply: true },
-  nyx: { qualification_threshold: 65, follow_up_hours: 24 },
-  hermes: { confirm_bookings: true, notify_staff: true },
-};
-
-const DEFAULT_BEHAVIOR: Record<string, Record<string, unknown>> = {
-  tala: { tone: "hospitality", autonomy_mode: "auto_execute", response_sla_seconds: 25 },
-  nyx: { tone: "persuasive", autonomy_mode: "auto_execute", response_sla_seconds: 45 },
-  hermes: { tone: "executive", autonomy_mode: "auto_execute", response_sla_seconds: 15 },
-};
+/**
+ * Demo credentials. The seeded database is demo data — every seeded account
+ * shares this password so evaluators can log in. Override with
+ * SEED_DEMO_PASSWORD before seeding anything you care about.
+ */
+export const DEMO_PLATFORM_EMAIL = "admin@core.local";
+export const DEMO_PASSWORD = process.env.SEED_DEMO_PASSWORD ?? "core-demo-2026";
+export const demoTenantEmail = (slug: string): string => `admin@${slug}.example`;
 
 /** name, slug, industry, lettermark, accent, status */
 const TENANT_PRESETS = [
@@ -53,9 +56,16 @@ function seed(): { tenants: number; leads: number; bookings: number } {
   const now = Date.now();
   let leadTotal = 0;
   let bookingTotal = 0;
+  const passwordHash = hashPassword(DEMO_PASSWORD);
 
   db.exec("BEGIN");
   try {
+    // Platform-level administrator (not bound to any tenant).
+    db.prepare(
+      `INSERT INTO users (id, tenant_id, name, email, role, password_hash, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+    ).run(randomUUID(), null, "Platform Admin", DEMO_PLATFORM_EMAIL, "admin", passwordHash, iso(60 * DAY));
+
     TENANT_PRESETS.forEach(([name, slug, industry, logo, color, status], i) => {
       const tenantId = `10000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`;
       const createdAt = iso((i === 5 ? 2 : 30 + i * 9) * DAY);
@@ -79,21 +89,23 @@ function seed(): { tenants: number; leads: number; bookings: number } {
       });
 
       db.prepare(
-        `INSERT INTO users (id, tenant_id, name, email, role, created_at) VALUES (?,?,?,?,?,?)`,
-      ).run(randomUUID(), tenantId, `${name} Admin`, `admin@${slug}.example`, "admin", createdAt);
+        `INSERT INTO users (id, tenant_id, name, email, role, password_hash, created_at)
+         VALUES (?,?,?,?,?,?,?)`,
+      ).run(randomUUID(), tenantId, `${name} Admin`, demoTenantEmail(slug), "admin", passwordHash, createdAt);
 
       AGENTS.forEach((agent) => {
         db.prepare(
-          `INSERT INTO agents (id, tenant_id, agent, enabled, config, behavior,
+          `INSERT INTO agents (id, tenant_id, agent, enabled, config, behavior, openrouter,
                                actions_completed, last_action, last_active_at)
-           VALUES (?,?,?,?,?,?,0,'Awaiting first request',NULL)`,
+           VALUES (?,?,?,?,?,?,?,0,'Awaiting first request',NULL)`,
         ).run(
           `${tenantId}:${agent}`,
           tenantId,
           agent,
           status !== "setup" ? 1 : 0,
-          JSON.stringify(DEFAULT_CONFIG[agent]),
-          JSON.stringify(DEFAULT_BEHAVIOR[agent]),
+          JSON.stringify(DEFAULT_AGENT_CONFIG[agent]),
+          JSON.stringify(DEFAULT_AGENT_BEHAVIOR[agent]),
+          JSON.stringify(DEFAULT_AGENT_OPENROUTER[agent]),
         );
       });
 

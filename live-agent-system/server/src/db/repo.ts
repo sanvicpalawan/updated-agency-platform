@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { db, transaction } from "./connection.ts";
+import {
+  DEFAULT_AGENT_BEHAVIOR,
+  DEFAULT_AGENT_CONFIG,
+  DEFAULT_AGENT_OPENROUTER,
+  mergedBehavior,
+  mergedOpenRouter,
+} from "../config/agentDefaults.ts";
 import type {
   AgentConfigRow,
   AgentId,
@@ -83,7 +90,11 @@ const mapAgent = (r: any): AgentConfigRow => ({
   ...r,
   enabled: Boolean(r.enabled),
   config: parse(r.config, {}),
-  behavior: parse(r.behavior, {}),
+  // Legacy rows (seeded before da39f3c, or created with `{}`) are merged over
+  // the full server-side defaults so the API never returns an empty profile —
+  // an empty `behavior.system_prompt` crashed the admin Agents page.
+  behavior: mergedBehavior(r.agent, parse(r.behavior, {})),
+  openrouter: mergedOpenRouter(r.agent, parse(r.openrouter, {})),
   last_active_at: r.last_active_at ?? null,
 });
 
@@ -112,6 +123,7 @@ export const tenants = {
     status?: Tenant["status"];
     branding_config: Tenant["branding_config"];
     tools_config?: Record<string, unknown>;
+    openrouter_api_key?: string;
   }): Tenant {
     const slug = String(input.slug ?? "").trim();
     if (!input.name?.trim()) throw new Error("Tenant name is required.");
@@ -127,8 +139,8 @@ export const tenants = {
     const id = newId();
     db.prepare(
       `INSERT INTO tenants (id, name, slug, industry, status, branding_config, rules,
-                            tools_config, console_config, created_at)
-       VALUES ($id,$name,$slug,$industry,$status,$branding_config,$rules,$tools_config,$console_config,$created_at)`,
+                            tools_config, console_config, openrouter_api_key, created_at)
+       VALUES ($id,$name,$slug,$industry,$status,$branding_config,$rules,$tools_config,$console_config,$openrouter_api_key,$created_at)`,
     ).run({
       id,
       name: input.name.trim(),
@@ -139,6 +151,7 @@ export const tenants = {
       rules: JSON.stringify({ tala: "auto-reply-leads", nyx: "follow-up-after-24h", hermes: "log-all-bookings" }),
       tools_config: JSON.stringify(input.tools_config ?? {}),
       console_config: JSON.stringify({}),
+      openrouter_api_key: String(input.openrouter_api_key ?? ""),
       created_at: now(),
     });
     return tenants.require(id);
@@ -152,7 +165,7 @@ export const tenants = {
     db.prepare(
       `UPDATE tenants SET name=$name, slug=$slug, industry=$industry, status=$status,
               branding_config=$branding_config, rules=$rules, tools_config=$tools_config,
-              console_config=$console_config
+              console_config=$console_config, openrouter_api_key=$openrouter_api_key
        WHERE id=$id`,
     ).run({
       id,
@@ -164,6 +177,7 @@ export const tenants = {
       rules: JSON.stringify(next.rules),
       tools_config: JSON.stringify(next.tools_config ?? {}),
       console_config: JSON.stringify(next.console_config ?? {}),
+      openrouter_api_key: String(next.openrouter_api_key ?? ""),
     });
     return tenants.require(id);
   },
@@ -529,31 +543,37 @@ export const agents = {
     if (existing) return existing;
     const id = `${ctx.tenant_id}:${agent}`;
     db.prepare(
-      `INSERT INTO agents (id, tenant_id, agent, enabled, config, behavior, actions_completed,
-                           last_action, last_active_at)
-       VALUES ($id,$tenant_id,$agent,$enabled,$config,$behavior,0,'Awaiting first request',NULL)`,
+      `INSERT INTO agents (id, tenant_id, agent, enabled, config, behavior, openrouter,
+                           actions_completed, last_action, last_active_at)
+       VALUES ($id,$tenant_id,$agent,$enabled,$config,$behavior,$openrouter,0,'Awaiting first request',NULL)`,
     ).run({
       id,
       tenant_id: ctx.tenant_id,
       agent,
       enabled: defaults.enabled === undefined ? 1 : defaults.enabled ? 1 : 0,
-      config: JSON.stringify(defaults.config ?? {}),
-      behavior: JSON.stringify(defaults.behavior ?? {}),
+      // New rows always get the COMPLETE profiles — never `{}`.
+      config: JSON.stringify(defaults.config ?? DEFAULT_AGENT_CONFIG[agent]),
+      behavior: JSON.stringify(defaults.behavior ?? DEFAULT_AGENT_BEHAVIOR[agent]),
+      openrouter: JSON.stringify(defaults.openrouter ?? DEFAULT_AGENT_OPENROUTER[agent]),
     });
     return agents.get(ctx, agent)!;
   },
   update(
     ctx: TenantContext,
     agent: AgentId,
-    patch: Partial<Pick<AgentConfigRow, "enabled" | "config" | "behavior">>,
+    patch: Partial<Pick<AgentConfigRow, "enabled" | "config" | "behavior" | "openrouter">>,
   ): AgentConfigRow {
     const current = agents.upsert(ctx, agent);
+    // Partial patches are MERGED into the stored profile, never stored bare —
+    // a bare partial save would silently erase the other fields (the exact
+    // failure mode da39f3c fixed).
     db.prepare(
-      "UPDATE agents SET enabled = ?, config = ?, behavior = ? WHERE tenant_id = ? AND agent = ?",
+      "UPDATE agents SET enabled = ?, config = ?, behavior = ?, openrouter = ? WHERE tenant_id = ? AND agent = ?",
     ).run(
       patch.enabled === undefined ? (current.enabled ? 1 : 0) : patch.enabled ? 1 : 0,
-      JSON.stringify(patch.config ?? current.config),
-      JSON.stringify(patch.behavior ?? current.behavior),
+      JSON.stringify(patch.config ? { ...current.config, ...patch.config } : current.config),
+      JSON.stringify(patch.behavior ? { ...current.behavior, ...patch.behavior } : current.behavior),
+      JSON.stringify(patch.openrouter ? { ...current.openrouter, ...patch.openrouter } : current.openrouter),
       ctx.tenant_id,
       agent,
     );

@@ -72,10 +72,18 @@ class BackendStore {
     this.listeners.forEach((listener) => listener());
   }
 
+  private setStatus(next: StoreStatus): void {
+    if (this.status === next) return;
+    this.status = next;
+    // Status is part of the observable state: pages must be able to tell
+    // "still loading" and "backend unreachable" apart from "genuinely empty".
+    this.bump();
+  }
+
   /** Pull the whole platform snapshot. Safe to call concurrently. */
   async load(force = false): Promise<void> {
     if (this.loading && !force) return this.loading;
-    this.status = "loading";
+    this.setStatus("loading");
     this.loading = (async () => {
       try {
         const snapshot = await backend.snapshot();
@@ -90,14 +98,12 @@ class BackendStore {
           events: snapshot.events as SystemEvent[],
           agents: snapshot.agents as AgentConfig[],
         };
-        this.status = "ready";
         this.lastError = null;
         this.lastSyncedAt = new Date().toISOString();
-        this.bump();
+        this.setStatus("ready");
       } catch (error) {
-        this.status = "error";
         this.lastError = error instanceof Error ? error.message : String(error);
-        this.bump();
+        this.setStatus("error");
         throw error;
       } finally {
         this.loading = null;
@@ -120,7 +126,7 @@ class BackendStore {
 
   listTenants(session: Session): Tenant[] {
     if (!session.user_id) throw new Error("An active session is required.");
-    if (!["platform_admin", "tenant_admin"].includes(session.role)) {
+    if (!["platform_admin", "tenant_admin", "member"].includes(session.role)) {
       throw new Error("Unrecognized session role.");
     }
     if (session.role !== "platform_admin" && !session.tenant_id) {

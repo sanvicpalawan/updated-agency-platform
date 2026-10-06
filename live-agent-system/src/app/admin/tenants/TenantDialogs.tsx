@@ -444,7 +444,10 @@ function DeleteTenant({ tenant, onClose }: { tenant: Tenant; onClose: () => void
           className="button danger"
           disabled={confirm !== tenant.name}
           onClick={() => {
-            if (act(() => tenantsApi.remove(session, tenant.id), `${tenant.name} and its scoped records deleted.`)) onClose();
+            void act(
+              () => tenantsApi.remove(session, tenant.id),
+              `${tenant.name} and its scoped records deleted.`,
+            ).then((ok) => { if (ok) onClose(); });
           }}
         >
           <Trash2 size={14} />

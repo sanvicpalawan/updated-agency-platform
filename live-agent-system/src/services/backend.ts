@@ -5,7 +5,11 @@
  * the Node/SQLite runtime. Requests use relative URLs so the Vite dev server can
  * proxy them (see vite.config.ts) and the same code works when the API is served
  * from the same origin in production.
+ *
+ * Every request carries the bearer token from services/auth.ts; a 401 response
+ * clears the session, which sends the UI back to the login screen.
  */
+import { authStore, clearAuth } from "./auth";
 
 export interface ApiError extends Error {
   status: number;
@@ -14,11 +18,24 @@ export interface ApiError extends Error {
 const BASE = "/api";
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    method,
-    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  const token = authStore.getToken();
+  const headers: Record<string, string> = {};
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      method,
+      headers: Object.keys(headers).length ? headers : undefined,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (error) {
+    // Network-level failure (backend down) — surface as a typed error so the
+    // UI can distinguish "unreachable" from "server said no".
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Backend unreachable: ${message}`);
+  }
 
   const text = await res.text();
   let parsed: unknown = null;
@@ -29,6 +46,10 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   }
 
   if (!res.ok) {
+    if (res.status === 401) {
+      // Expired or revoked session: drop it so the login screen appears.
+      clearAuth();
+    }
     const message =
       (parsed as { error?: string } | null)?.error ?? `Request failed with status ${res.status}`;
     const error = new Error(message) as ApiError;
@@ -61,6 +82,11 @@ export interface Snapshot {
 export const backend = {
   health: () => request<any>("GET", "/health"),
   snapshot: () => request<Snapshot>("GET", "/snapshot"),
+
+  auth: {
+    me: () => request<{ session: any }>("GET", "/auth/me"),
+    logout: () => request<{ ok: boolean }>("POST", "/auth/logout"),
+  },
 
   tenants: {
     create: (input: unknown) => request<{ tenant: any }>("POST", "/tenants", input),

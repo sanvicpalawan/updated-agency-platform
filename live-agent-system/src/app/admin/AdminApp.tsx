@@ -11,6 +11,7 @@ import {
   ExternalLink,
   Info,
   Menu,
+  LogOut,
   Search,
   ShieldCheck,
   X,
@@ -19,6 +20,7 @@ import { AdminSidebar } from "../../components/sidebar/AdminSidebar";
 import { PLATFORM } from "../../config/platform";
 import { runIsolationChecks, type IsolationCheck } from "../../core/isolationChecks";
 import { db } from "../../services/db";
+import { logout } from "../../services/auth";
 import { openRouterCatalog, timeAgo, useOpenRouterCatalog } from "../../services/openrouter";
 import { SyncDot } from "./components/OpenRouterSync";
 import { engine } from "../../system/useSystemEngine";
@@ -35,7 +37,7 @@ import BrandingPage from "./branding/page";
 import RulesPage from "./rules/page";
 import SettingsPage from "./settings/page";
 import { TenantDialogs } from "./tenants/TenantDialogs";
-import { contrast } from "./utils";
+import { contrast, errorMessage } from "./utils";
 import "./admin.css";
 
 const pages: Record<AdminPage, () => React.JSX.Element> = {
@@ -60,7 +62,7 @@ export default function AdminApp() {
 }
 
 function AdminShell() {
-  const { page, tenant, live, notices, dismissNotice, data } = useAdmin();
+  const { page, tenant, live, notices, dismissNotice, data, session } = useAdmin();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [environmentOpen, setEnvironmentOpen] = useState(false);
@@ -173,6 +175,21 @@ function AdminShell() {
             >
               <CircleHelp size={16} />
             </button>
+            <span
+              className="live-indicator"
+              title={`Signed in as ${session.name} (${session.role.replace(/_/g, " ")})`}
+              style={{ gap: 7 }}
+            >
+              {session.name}
+              <button
+                className="icon-button"
+                onClick={() => logout()}
+                aria-label="Sign out"
+                title="Sign out"
+              >
+                <LogOut size={14} />
+              </button>
+            </span>
           </div>
         </header>
         <div className="admin-content" ref={content}>
@@ -327,7 +344,7 @@ function CommandSearch({ onClose }: { onClose: () => void }) {
 }
 
 function EnvironmentDialog({ onClose }: { onClose: () => void }) {
-  const { live, setLive, session, notify, setScope } = useAdmin();
+  const { live, setLive, session, notify } = useAdmin();
   const [checks, setChecks] = useState<IsolationCheck[] | null>(null);
   const [resetOpen, setResetOpen] = useState(false);
   const [confirmation, setConfirmation] = useState("");
@@ -397,10 +414,16 @@ function EnvironmentDialog({ onClose }: { onClose: () => void }) {
                 className="button danger small"
                 disabled={confirmation !== "RESET"}
                 onClick={() => {
-                  db.reset(session);
-                  setScope("all");
-                  notify("Demo workspaces restored.");
-                  onClose();
+                  // The reset wipes ALL sessions server-side (the sessions table
+                  // is part of the demo data), so it necessarily signs us out.
+                  void db
+                    .reset(session)
+                    .then(() => {
+                      notify("Demo workspaces restored. Sign in again with the demo credentials.");
+                      onClose();
+                      logout();
+                    })
+                    .catch((err) => notify(errorMessage(err), "error"));
                 }}
               >
                 Reset data

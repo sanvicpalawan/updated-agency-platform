@@ -4,7 +4,6 @@ import type {
   AgentOpenRouterConfig,
   JsonObject,
   OpenRouterModelOption,
-  Session,
   TenantRules,
   ToolId,
   ToolSetting,
@@ -17,13 +16,9 @@ export const PLATFORM = {
   version: "1.2.0",
 };
 
-// This is a mock identity, not an authentication mechanism.
-export const MOCK_ADMIN: Session = {
-  user_id: "admin-local-001",
-  name: "Alex Morgan",
-  role: "platform_admin",
-  tenant_id: null,
-};
+// Identity comes from services/auth.ts (real bearer sessions issued by
+// POST /api/auth/login). There is deliberately no hardcoded admin identity
+// left in the client.
 
 export const AGENTS: Record<AgentId, { name: string; role: string; color: string; description: string }> = {
   tala: { name: "TALA", role: "Guest experience & intake", color: "#8ccbee", description: "Inbound inquiries, WhatsApp/web replies, and booking intake" },
@@ -269,6 +264,63 @@ export const DEFAULT_RULES: TenantRules = {
   nyx: "follow-up-after-24h",
   hermes: "log-all-bookings",
 };
+
+/**
+ * Defensive profile merges (fix from da39f3c).
+ *
+ * The Agents page used `config.behavior ?? DEFAULT_AGENT_BEHAVIOR[id]` — but
+ * the backend returns `{}` for an unset profile, and `{} ?? fallback` does NOT
+ * fall through, so `behavior.system_prompt.replace(...)` threw and the whole
+ * page crashed into the error boundary. These merges treat defaults as the
+ * base and layer whatever the server stored on top, field by field, so every
+ * property the UI dereferences is guaranteed to exist.
+ */
+const nonEmptyString = (value: unknown, fallback: string): string =>
+  typeof value === "string" && value.length > 0 ? value : fallback;
+
+export function mergeBehavior(
+  agent: AgentId,
+  raw: Partial<AgentBehaviorConfig> | null | undefined,
+): AgentBehaviorConfig {
+  const base = DEFAULT_AGENT_BEHAVIOR[agent];
+  const r = raw ?? {};
+  const sla = Number(r.response_sla_seconds);
+  return {
+    persona_title: nonEmptyString(r.persona_title, base.persona_title),
+    tone: typeof r.tone === "string" && r.tone.length > 0 ? r.tone : base.tone,
+    system_prompt: nonEmptyString(r.system_prompt, base.system_prompt),
+    greeting_style: nonEmptyString(r.greeting_style, base.greeting_style),
+    autonomy_mode:
+      typeof r.autonomy_mode === "string" && r.autonomy_mode.length > 0
+        ? r.autonomy_mode
+        : base.autonomy_mode,
+    response_sla_seconds: Number.isFinite(sla) ? sla : base.response_sla_seconds,
+    escalation_rule: nonEmptyString(r.escalation_rule, base.escalation_rule),
+    connected_tools:
+      Array.isArray(r.connected_tools) && r.connected_tools.length > 0
+        ? [...r.connected_tools]
+        : [...base.connected_tools],
+  };
+}
+
+export function mergeOpenRouter(
+  agent: AgentId,
+  raw: Partial<AgentOpenRouterConfig> | null | undefined,
+): AgentOpenRouterConfig {
+  const base = DEFAULT_AGENT_OPENROUTER[agent];
+  const r = raw ?? {};
+  const temperature = Number(r.temperature);
+  const maxTokens = Number(r.max_tokens);
+  return {
+    enabled: typeof r.enabled === "boolean" ? r.enabled : base.enabled,
+    api_key: typeof r.api_key === "string" ? r.api_key : base.api_key,
+    model_tier: r.model_tier === "paid" ? "paid" : r.model_tier === "free" ? "free" : base.model_tier,
+    model_id: nonEmptyString(r.model_id, base.model_id),
+    temperature: Number.isFinite(temperature) ? temperature : base.temperature,
+    max_tokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : base.max_tokens,
+    fallback_to_rules: typeof r.fallback_to_rules === "boolean" ? r.fallback_to_rules : base.fallback_to_rules,
+  };
+}
 
 export const DEFAULT_AGENT_CONFIG: Record<AgentId, JsonObject> = {
   tala: { auto_reply: true, reply_template: "Thank you for contacting {business}. We have received your inquiry and will help you with the next step." },

@@ -4,16 +4,31 @@
  * Boots the real Express server against a throwaway SQLite file and drives it
  * over HTTP. Nothing here is mocked: the assertions read back what the agents
  * actually wrote to the database.
+ *
+ * Phases:
+ *   A. Fresh database, local strategy — auth, pipeline, persistence, authz.
+ *   B. Migration — a hand-built v1 database is upgraded to the current schema.
+ *   C. LLM seam — the server is pointed at a LOCAL OpenRouter-compatible mock
+ *      so the openrouter adapter, token accounting and cost capture are
+ *      verified end-to-end without external egress.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 // Random high port so a leftover process from an earlier run cannot collide.
 const PORT = 42000 + Math.floor(Math.random() * 6000);
 const BASE = `http://127.0.0.1:${PORT}`;
 const DB_FILE = path.join(os.tmpdir(), `core-e2e-${process.pid}.sqlite`);
+const MIGRATION_DB = path.join(os.tmpdir(), `core-e2e-migrate-${process.pid}.sqlite`);
+const LLM_DB = path.join(os.tmpdir(), `core-e2e-llm-${process.pid}.sqlite`);
+
+/** Default seeded demo password (see server/src/db/seed.ts). */
+const DEMO_PASSWORD = "core-demo-2026";
+const PLATFORM_EMAIL = "admin@core.local";
 
 let passed = 0;
 let failed = 0;
@@ -30,17 +45,23 @@ function check(name: string, condition: boolean, detail = ""): void {
   }
 }
 
+let ADMIN_TOKEN = "";
+
 async function api(
   method: string,
   url: string,
   body?: unknown,
+  token: string | undefined = ADMIN_TOKEN,
 ): Promise<{ status: number; json: any }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15_000);
   try {
+    const headers: Record<string, string> = {};
+    if (body) headers["Content-Type"] = "application/json";
+    if (token) headers["Authorization"] = `Bearer ${token}`;
     const res = await fetch(`${BASE}${url}`, {
       method,
-      headers: body ? { "Content-Type": "application/json" } : undefined,
+      headers,
       body: body ? JSON.stringify(body) : undefined,
       signal: controller.signal,
     });
@@ -86,21 +107,160 @@ function killTree(child: ChildProcess, signal: NodeJS.Signals = "SIGTERM"): void
   }
 }
 
-async function main(): Promise<void> {
-  for (const suffix of ["", "-wal", "-shm"]) {
-    try { fs.rmSync(DB_FILE + suffix, { force: true }); } catch { /* ignore */ }
-  }
+async function stopServer(): Promise<void> {
+  if (!server) return;
+  const child = server;
+  killTree(child);
+  await new Promise((r) => child.once("exit", r));
+  server = undefined;
+}
 
+function spawnServer(env: Record<string, string> = {}): void {
   server = spawn("npx", ["tsx", "src/index.ts"], {
     cwd: path.resolve(import.meta.dirname, ".."),
-    env: { ...process.env, PORT: String(PORT), DB_PATH: DB_FILE, HOST: "127.0.0.1" },
+    env: { ...process.env, PORT: String(PORT), HOST: "127.0.0.1", ...env },
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
   });
   server.stdout?.on("data", (d) => process.stdout.write(`  [server] ${d}`));
   server.stderr?.on("data", (d) => process.stderr.write(`  [server:err] ${d}`));
+}
 
+function removeDb(file: string): void {
+  for (const suffix of ["", "-wal", "-shm"]) {
+    try { fs.rmSync(file + suffix, { force: true }); } catch { /* ignore */ }
+  }
+}
+
+async function login(email: string, password: string): Promise<{ status: number; json: any }> {
+  return api("POST", "/api/auth/login", { email, password }, undefined);
+}
+
+/* ------------------------------------------------------------------ */
+/* Local OpenRouter-compatible mock (phase C)                          */
+/* ------------------------------------------------------------------ */
+
+function startMockOpenRouter(): Promise<{ port: number; requests: { auth: string; system: string }[]; close: () => Promise<void> }> {
+  const requests: { auth: string; system: string }[] = [];
+  const srv = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (d) => (raw += d));
+    req.on("end", () => {
+      try {
+        const body = JSON.parse(raw || "{}");
+        const system = String(body.messages?.find((m: any) => m.role === "system")?.content ?? "");
+        requests.push({ auth: String(req.headers.authorization ?? ""), system });
+        const isNyx = system.includes("NYX");
+        const content = isNyx
+          ? JSON.stringify({
+              score: 88,
+              reasoning: "Corporate group of twelve with an urgent timeline and explicit budget signals.",
+              tags: ["urgent", "group_booking", "budget_present"],
+            })
+          : JSON.stringify({
+              reply: "Thank you for reaching out — I have your suite request for next week and will confirm availability shortly.",
+              intent: "booking",
+              next_action: "Check suite availability and send a quote.",
+            });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            id: "gen-mock",
+            model: "mock/openrouter-relay",
+            choices: [{ message: { role: "assistant", content } }],
+            usage: { prompt_tokens: 123, completion_tokens: 45, total_cost: 0.00067 },
+          }),
+        );
+      } catch (error) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(error) }));
+      }
+    });
+  });
+  return new Promise((resolve) => {
+    srv.listen(0, "127.0.0.1", () => {
+      const address = srv.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      resolve({ port, requests, close: () => new Promise((r) => srv.close(() => r())) });
+    });
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Phase B fixture: a genuine schema-v1 database                       */
+/* ------------------------------------------------------------------ */
+
+function buildV1Database(file: string): void {
+  removeDb(file);
+  const db = new DatabaseSync(file);
+  db.exec(`
+    PRAGMA journal_mode = WAL;
+    CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO schema_meta (key, value) VALUES ('version', '1');
+    CREATE TABLE tenants (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE,
+      industry TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active',
+      branding_config TEXT NOT NULL DEFAULT '{}', rules TEXT NOT NULL DEFAULT '{}',
+      tools_config TEXT NOT NULL DEFAULT '{}', console_config TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE users (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id),
+      name TEXT NOT NULL, email TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin','member')),
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_users_tenant ON users(tenant_id);
+    CREATE TABLE agents (
+      id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id),
+      agent TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+      config TEXT NOT NULL DEFAULT '{}', behavior TEXT NOT NULL DEFAULT '{}',
+      actions_completed INTEGER NOT NULL DEFAULT 0,
+      last_action TEXT NOT NULL DEFAULT 'Awaiting first request', last_active_at TEXT,
+      UNIQUE (tenant_id, agent)
+    );
+    INSERT INTO tenants (id, name, slug, industry, status, branding_config, rules, created_at)
+      VALUES ('v1-tenant', 'Legacy Co', 'legacy-co', 'Test', 'active', '{}', '{}', '2026-01-01T00:00:00.000Z');
+    INSERT INTO users (id, tenant_id, name, email, role, created_at)
+      VALUES ('v1-user', 'v1-tenant', 'Legacy User', 'legacy@legacy-co.example', 'admin', '2026-01-01T00:00:00.000Z');
+    INSERT INTO agents (id, tenant_id, agent, enabled, config, behavior)
+      VALUES ('v1-tenant:tala', 'v1-tenant', 'tala', 1, '{"auto_reply":true}', '{"tone":"hospitality"}');
+  `);
+  db.close();
+}
+
+/* ------------------------------------------------------------------ */
+
+async function main(): Promise<void> {
+  removeDb(DB_FILE);
+
+  console.log("\n── 0. authentication gate ───────────────────────────");
+  spawnServer({ DB_PATH: DB_FILE });
   await waitForServer();
+
+  const noAuth = await api("GET", "/api/tenants", undefined, undefined);
+  check("unauthenticated /api/tenants is a 401", noAuth.status === 401, `status ${noAuth.status}`);
+  const noAuthSnapshot = await api("GET", "/api/snapshot", undefined, undefined);
+  check("unauthenticated /api/snapshot is a 401", noAuthSnapshot.status === 401, `status ${noAuthSnapshot.status}`);
+  const badToken = await api("GET", "/api/tenants", undefined, "deadbeef");
+  check("garbage bearer token is a 401", badToken.status === 401, `status ${badToken.status}`);
+  const badLogin = await login(PLATFORM_EMAIL, "wrong-password");
+  check("wrong password is a 401", badLogin.status === 401, `status ${badLogin.status}`);
+  const unknownLogin = await login("nobody@core.local", DEMO_PASSWORD);
+  check("unknown email is a 401 (no enumeration)", unknownLogin.status === 401, `status ${unknownLogin.status}`);
+  const healthPublic = await fetch(`${BASE}/api/health`).then((r) => r.status);
+  check("health stays public for monitoring", healthPublic === 200, `status ${healthPublic}`);
+
+  const goodLogin = await login(PLATFORM_EMAIL, DEMO_PASSWORD);
+  check("platform admin login succeeds", goodLogin.status === 200, `status ${goodLogin.status} ${JSON.stringify(goodLogin.json)}`);
+  check("login returns a bearer token", typeof goodLogin.json?.token === "string" && goodLogin.json.token.length >= 32);
+  check("login reports platform_admin role", goodLogin.json?.session?.role === "platform_admin");
+  check("platform admin has no tenant binding", goodLogin.json?.session?.tenant_id === null);
+  ADMIN_TOKEN = goodLogin.json?.token ?? "";
+
+  const me = await api("GET", "/api/auth/me");
+  check("/api/auth/me echoes the session", me.json?.session?.email === PLATFORM_EMAIL);
+
   console.log("\n── 1. runtime + seed ────────────────────────────────");
 
   const health = await api("GET", "/api/health");
@@ -312,7 +472,7 @@ async function main(): Promise<void> {
     `${leadsBefore} -> ${leadsAfter}`);
 
   const noTenant = await api("GET", "/api/leads");
-  check("missing tenant_id is a 400", noTenant.status === 400, `status ${noTenant.status}`);
+  check("missing tenant_id is a 400 for platform admins", noTenant.status === 400, `status ${noTenant.status}`);
   const allScope = await api("GET", "/api/leads?tenant_id=all");
   check("tenant_id=all is rejected", allScope.status === 400, `status ${allScope.status}`);
 
@@ -340,25 +500,148 @@ async function main(): Promise<void> {
     JSON.stringify(disabled.json.runs.map((r: any) => r.status)));
   await api("POST", `/api/agents/nyx/enabled?tenant_id=${baia.id}`, { enabled: true });
 
-  console.log("\n── 9. persistence across restart ────────────────────");
+  console.log("\n── 9. openrouter + behavior config persistence (da39f3c) ─");
+
+  // Rule: never trust a 200. Every save below is READ BACK through a fresh GET.
+  const keySave = await api("PATCH", `/api/tenants/${baia.id}`, {
+    openrouter_api_key: "sk-or-v1-baia-workspace-key-0123456789",
+  });
+  check("PATCH tenant key returns the saved value", keySave.status === 200,
+    `status ${keySave.status} ${JSON.stringify(keySave.json)}`);
+  const tenantsAfterKey = await api("GET", "/api/tenants");
+  const baiaReadback = tenantsAfterKey.json.tenants.find((t: any) => t.id === baia.id);
+  check("tenant openrouter_api_key survives a read-back",
+    baiaReadback?.openrouter_api_key === "sk-or-v1-baia-workspace-key-0123456789",
+    `got "${baiaReadback?.openrouter_api_key}"`);
+
+  const agentPatch = await api("PATCH", `/api/agents/nyx?tenant_id=${baia.id}`, {
+    behavior: { tone: "persuasive", system_prompt: "Custom NYX prompt for BAIA only." },
+    openrouter: { model_tier: "paid", model_id: "openai/gpt-4o-mini", temperature: 0.4 },
+  });
+  check("PATCH agent config returns 200", agentPatch.status === 200, `status ${agentPatch.status}`);
+  const agentsReadback = await api("GET", `/api/agents?tenant_id=${baia.id}`);
+  const nyxCfg = agentsReadback.json.agents.find((a: any) => a.agent === "nyx");
+  check("agent behavior.system_prompt survives a read-back",
+    nyxCfg?.behavior?.system_prompt === "Custom NYX prompt for BAIA only.",
+    `got "${nyxCfg?.behavior?.system_prompt}"`);
+  check("agent openrouter profile survives a read-back",
+    nyxCfg?.openrouter?.model_id === "openai/gpt-4o-mini" && nyxCfg?.openrouter?.model_tier === "paid",
+    JSON.stringify(nyxCfg?.openrouter));
+  check("partial behavior save keeps default fields",
+    typeof nyxCfg?.behavior?.persona_title === "string" && nyxCfg.behavior.persona_title.length > 0,
+    `persona_title=${JSON.stringify(nyxCfg?.behavior?.persona_title)}`);
+
+  // Simulate a LEGACY row: pre-fix databases stored minimal behavior
+  // ({"tone":...}) or plain '{}'. The crash in the admin Agents page came
+  // from serving exactly this. Rewrite the row behind the server's back and
+  // confirm the API still serves a complete profile (defaults merged in).
+  {
+    const probe = new DatabaseSync(DB_FILE);
+    probe.prepare(
+      "UPDATE agents SET behavior = ?, openrouter = '{}' WHERE tenant_id = ? AND agent = 'tala'",
+    ).run('{"tone":"hospitality"}', baia.id);
+    probe.close();
+  }
+  const legacyAgents = await api("GET", `/api/agents?tenant_id=${baia.id}`);
+  const legacyTala = legacyAgents.json.agents.find((a: any) => a.agent === "tala");
+  check("legacy minimal behavior row is served complete (defaults merged)",
+    typeof legacyTala?.behavior?.system_prompt === "string" &&
+      legacyTala.behavior.system_prompt.length > 40 &&
+      Array.isArray(legacyTala?.behavior?.connected_tools) &&
+      legacyTala.behavior.connected_tools.length > 0,
+    JSON.stringify(legacyTala?.behavior));
+  check("legacy empty openrouter row is served complete",
+    typeof legacyTala?.openrouter?.model_id === "string" && legacyTala.openrouter.model_id.length > 0,
+    JSON.stringify(legacyTala?.openrouter));
+
+  const talaCfg = legacyTala;
+  check("seeded behavior is complete (no empty {} from the backend)",
+    typeof talaCfg?.behavior?.system_prompt === "string" && talaCfg.behavior.system_prompt.includes("TALA"),
+    JSON.stringify(talaCfg?.behavior));
+  check("seeded openrouter profile is complete",
+    typeof talaCfg?.openrouter?.model_id === "string" && talaCfg.openrouter.model_id.length > 0,
+    JSON.stringify(talaCfg?.openrouter));
+
+  const newTenant = await api("POST", "/api/tenants", {
+    name: "Fresh Tenant",
+    slug: "fresh-tenant",
+    branding_config: { app_name: "Fresh Tenant", logo: "F", primary_color: "#aabbcc", theme: "dark" },
+  });
+  check("new tenant created", newTenant.status === 200, `status ${newTenant.status} ${JSON.stringify(newTenant.json)}`);
+  const freshAgents = await api("GET", `/api/agents?tenant_id=${newTenant.json.tenant.id}`);
+  const freshTala = freshAgents.json.agents.find((a: any) => a.agent === "tala");
+  check("new tenant agents are seeded with complete behavior",
+    typeof freshTala?.behavior?.system_prompt === "string" &&
+      freshTala.behavior.system_prompt.length > 40 &&
+      Array.isArray(freshTala?.behavior?.connected_tools) &&
+      freshTala.behavior.connected_tools.length > 0,
+    JSON.stringify(freshTala?.behavior));
+  check("new tenant agents are seeded with openrouter profiles",
+    Boolean(freshTala?.openrouter?.model_id), JSON.stringify(freshTala?.openrouter));
+
+  console.log("\n── 10. authorization enforcement ────────────────────");
+
+  const baiaAdminLogin = await login("admin@baia.example", DEMO_PASSWORD);
+  check("tenant admin login succeeds", baiaAdminLogin.status === 200, `status ${baiaAdminLogin.status}`);
+  const baiaToken = baiaAdminLogin.json?.token ?? "";
+  check("tenant admin role reported", baiaAdminLogin.json?.session?.role === "tenant_admin");
+  check("tenant admin is bound to BAIA", baiaAdminLogin.json?.session?.tenant_id === baia.id);
+
+  const tenantSnapshot = await api("GET", "/api/snapshot", undefined, baiaToken);
+  check("tenant snapshot contains only the caller's tenant",
+    tenantSnapshot.json?.tenants?.length === 1 && tenantSnapshot.json.tenants[0]?.id === baia.id,
+    `tenants=${JSON.stringify(tenantSnapshot.json?.tenants?.map((t: any) => t.slug))}`);
+  check("tenant snapshot leaks no foreign leads",
+    Array.isArray(tenantSnapshot.json?.leads) &&
+      tenantSnapshot.json.leads.every((l: any) => l.tenant_id === baia.id),
+    `foreign=${tenantSnapshot.json?.leads?.filter((l: any) => l.tenant_id !== baia.id)?.length}`);
+
+  const adminSnapshot = await api("GET", "/api/snapshot");
+  check("platform snapshot still returns the whole platform",
+    adminSnapshot.json?.tenants?.length === 7, `tenants=${adminSnapshot.json?.tenants?.length}`);
+
+  const crossRead = await api("GET", `/api/leads?tenant_id=${atrium.id}`, undefined, baiaToken);
+  check("tenant admin cannot read another tenant", crossRead.status === 403, `status ${crossRead.status}`);
+  const crossWrite = await api("PATCH", `/api/tenants/${atrium.id}`, { name: "Hijacked" }, baiaToken);
+  check("tenant admin cannot patch another tenant", crossWrite.status === 403, `status ${crossWrite.status}`);
+  const hijackCheck = await api("GET", "/api/tenants");
+  check("the foreign tenant was not modified",
+    hijackCheck.json.tenants.find((t: any) => t.id === atrium.id)?.name === "The Atrium");
+
+  const tenantCreate = await api(
+    "POST", "/api/tenants",
+    { name: "Sneaky", slug: "sneaky", branding_config: { app_name: "S", logo: "S", primary_color: "#112233", theme: "dark" } },
+    baiaToken,
+  );
+  check("tenant admin cannot create tenants", tenantCreate.status === 403, `status ${tenantCreate.status}`);
+
+  const ownScoped = await api("GET", "/api/leads", undefined, baiaToken);
+  check("tenant admin reads own tenant without naming it", ownScoped.status === 200,
+    `status ${ownScoped.status}`);
+  check("implicit scope returns only own records",
+    ownScoped.json.leads.every((l: any) => l.tenant_id === baia.id));
+
+  const ownPatch = await api("PATCH", `/api/tenants/${baia.id}`, { industry: "Hospitality +" }, baiaToken);
+  check("tenant admin can patch their own tenant", ownPatch.status === 200, `status ${ownPatch.status}`);
+
+  const resetDenied = await api("POST", "/api/admin/reset", {}, baiaToken);
+  check("tenant admin cannot reset the platform", resetDenied.status === 403, `status ${resetDenied.status}`);
+
+  console.log("\n── 11. persistence across restart ───────────────────");
   const beforeRestart = await api("GET", `/api/agents/runs?tenant_id=${baia.id}&limit=500`);
   // Re-read: section 8 re-scored this lead, so the value captured in section 2
   // is stale. We are testing persistence, not immutability.
   const scoreBeforeRestart = (await api("GET", `/api/leads?tenant_id=${baia.id}`)).json.leads
     .find((l: any) => l.id === lead.id)?.score;
 
-  if (server) killTree(server);
-  await new Promise((r) => server?.once("exit", r));
-
-  server = spawn("npx", ["tsx", "src/index.ts"], {
-    cwd: path.resolve(import.meta.dirname, ".."),
-    env: { ...process.env, PORT: String(PORT), DB_PATH: DB_FILE, HOST: "127.0.0.1" },
-    stdio: ["ignore", "pipe", "pipe"],
-    detached: true,
-  });
-  server.stdout?.on("data", () => {});
-  server.stderr?.on("data", (d) => process.stderr.write(`  [server:err] ${d}`));
+  await stopServer();
+  spawnServer({ DB_PATH: DB_FILE });
   await waitForServer();
+
+  // Sessions live in SQLite too — the token must still work after a restart.
+  const meAfterRestart = await api("GET", "/api/auth/me");
+  check("session survives a server restart", meAfterRestart.json?.session?.email === PLATFORM_EMAIL,
+    JSON.stringify(meAfterRestart.json));
 
   const afterRestart = await api("GET", `/api/agents/runs?tenant_id=${baia.id}&limit=500`);
   check("agent_runs survive a restart",
@@ -368,6 +651,99 @@ async function main(): Promise<void> {
     .find((l: any) => l.id === lead.id);
   check("lead + score survive a restart", persistedLead?.score === scoreBeforeRestart,
     `${scoreBeforeRestart} -> ${persistedLead?.score}`);
+
+  console.log("\n── 12. schema migration v1 → v3 ─────────────────────");
+  await stopServer();
+  buildV1Database(MIGRATION_DB);
+  spawnServer({ DB_PATH: MIGRATION_DB });
+  await waitForServer();
+
+  {
+    const probe = new DatabaseSync(MIGRATION_DB, { readOnly: true });
+    const version = (probe.prepare("SELECT value FROM schema_meta WHERE key = 'version'").get() as any)?.value;
+    check("migrated database reports schema v3", version === "3", `version=${version}`);
+    const tenantCols = (probe.prepare("PRAGMA table_info(tenants)").all() as any[]).map((c) => c.name);
+    check("migration added tenants.openrouter_api_key", tenantCols.includes("openrouter_api_key"),
+      JSON.stringify(tenantCols));
+    const agentCols = (probe.prepare("PRAGMA table_info(agents)").all() as any[]).map((c) => c.name);
+    check("migration added agents.openrouter", agentCols.includes("openrouter"), JSON.stringify(agentCols));
+    const userCols = (probe.prepare("PRAGMA table_info(users)").all() as any[]).map((c) => c.name);
+    check("migration added users.password_hash", userCols.includes("password_hash"), JSON.stringify(userCols));
+    const tables = (probe.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as any[]).map((t) => t.name);
+    check("migration created sessions table", tables.includes("sessions"), JSON.stringify(tables));
+    const legacyTenant = (probe.prepare("SELECT * FROM tenants WHERE id = 'v1-tenant'").get() as any);
+    check("v1 tenant data survived the migration", legacyTenant?.name === "Legacy Co");
+    const legacyUser = (probe.prepare("SELECT * FROM users WHERE id = 'v1-user'").get() as any);
+    check("v1 user survived the users rebuild", legacyUser?.email === "legacy@legacy-co.example");
+    probe.close();
+  }
+
+  console.log("\n── 13. LLM seam against a real chat/completions endpoint ─");
+  // The OpenRouter adapter has never touched a live model in CI; this phase
+  // proves the request/response wiring, strategy recording, and token/cost
+  // capture against an OpenRouter-compatible endpoint served locally.
+  await stopServer();
+  removeDb(LLM_DB);
+  const mock = await startMockOpenRouter();
+  check("mock OpenRouter is listening", mock.port > 0);
+
+  spawnServer({
+    DB_PATH: LLM_DB,
+    AGENT_LLM_PROVIDER: "openrouter",
+    OPENROUTER_API_KEY: "sk-or-v1-mockmockmockmock123",
+    OPENROUTER_BASE_URL: `http://127.0.0.1:${mock.port}/v1`,
+    OPENROUTER_MODEL: "mock/openrouter-relay",
+  });
+  await waitForServer();
+
+  const llmLogin = await login(PLATFORM_EMAIL, DEMO_PASSWORD);
+  ADMIN_TOKEN = llmLogin.json?.token ?? "";
+
+  const llmHealth = await api("GET", "/api/health");
+  check("runtime reports openrouter provider", llmHealth.json?.runtime?.provider === "openrouter",
+    JSON.stringify(llmHealth.json?.runtime));
+
+  const llmTenants = await api("GET", "/api/tenants");
+  const llmBaia = llmTenants.json.tenants.find((t: any) => t.slug === "baia");
+
+  const llmInquiry = await api("POST", `/api/events?tenant_id=${llmBaia.id}`, {
+    type: "inquiry.received",
+    message: "LLM-path inquiry",
+    payload: {
+      name: "LLM Tester",
+      email: "llm@arenacorp.com",
+      channel: "Website",
+      inquiry: "We need a suite for twelve guests next week, urgent.",
+    },
+  });
+  check("LLM pipeline accepted the inquiry", llmInquiry.status === 200, `status ${llmInquiry.status}`);
+
+  const llmRuns = await api("GET", `/api/agents/runs?tenant_id=${llmBaia.id}`);
+  const llmNyx = llmRuns.json.runs.find((r: any) => r.agent === "nyx");
+  const llmTala = llmRuns.json.runs.find((r: any) => r.agent === "tala" && r.output_text.includes("Thank you"));
+  check("NYX decision recorded strategy=openrouter", llmNyx?.strategy === "openrouter",
+    `strategy=${llmNyx?.strategy}`);
+  check("NYX LLM score persisted on the run", llmNyx?.decision?.score === 88,
+    `decision=${JSON.stringify(llmNyx?.decision)}`);
+  check("agent_runs.tokens_in populated from usage", llmNyx?.tokens_in === 123,
+    `tokens_in=${llmNyx?.tokens_in}`);
+  check("agent_runs.tokens_out populated from usage", llmNyx?.tokens_out === 45,
+    `tokens_out=${llmNyx?.tokens_out}`);
+  check("agent_runs.cost_usd populated from usage", Math.abs((llmNyx?.cost_usd ?? 0) - 0.00067) < 1e-9,
+    `cost_usd=${llmNyx?.cost_usd}`);
+  check("agent_runs.model_id records the served model", llmNyx?.model_id === "mock/openrouter-relay",
+    `model_id=${llmNyx?.model_id}`);
+  check("TALA reply came from the LLM path", Boolean(llmTala) || mock.requests.length >= 2,
+    `requests=${mock.requests.length}`);
+  check("adapter sent the bearer API key",
+    mock.requests.length > 0 && mock.requests.every((r) => r.auth === "Bearer sk-or-v1-mockmockmockmock123"),
+    JSON.stringify(mock.requests.map((r) => r.auth)));
+
+  const llmLead = (await api("GET", `/api/leads?tenant_id=${llmBaia.id}`)).json.leads
+    .find((l: any) => l.name === "LLM Tester");
+  check("LLM score written back to the lead", llmLead?.score === 88, `score=${llmLead?.score}`);
+
+  await mock.close();
 
   console.log(`\n${"─".repeat(54)}`);
   console.log(`${passed}/${passed + failed} checks passed.`);
@@ -384,8 +760,6 @@ main()
   })
   .finally(() => {
     if (server) killTree(server, "SIGKILL");
-    for (const suffix of ["", "-wal", "-shm"]) {
-      try { fs.rmSync(DB_FILE + suffix, { force: true }); } catch { /* ignore */ }
-    }
+    for (const file of [DB_FILE, MIGRATION_DB, LLM_DB]) removeDb(file);
     process.exit(failed > 0 ? 1 : 0);
   });
