@@ -1,11 +1,51 @@
 # CORE — Multi-Tenant Operations Control Center
 
-> **React 19 + Vite + TypeScript + Tailwind CSS v4**
-> Three AI agents · Four operational tools · White-label ready · Static deploy anywhere
+> **React 19 + Vite + TypeScript + Tailwind CSS v4 · Node 22 + Express + SQLite**
+> Three backend agents · Four operational tools · White-label ready
 
 ---
 
-**CORE** is a tenant-scoped business operations platform with a full admin dashboard, live operations console, and three autonomous agents — all in one self-contained React application. No backend required. No database setup. Zero infrastructure to start.
+## ⚠️ This is no longer a frontend-only demo
+
+The project was refactored from a browser-only agent simulation into a real
+backend-driven system. If you are reading an older description of this repo,
+these parts have changed:
+
+- **There IS a backend now** — `live-agent-system/server`, an Express + SQLite
+  (Node's built-in `node:sqlite`) runtime on port 4100.
+- **Business state lives in SQLite**, not `localStorage`. The browser holds only
+  a read cache plus UI preferences (selected tenant, model catalog cache).
+- **The agents run server-side** behind `/api/events`. The browser-side
+  `eventBus`, `dispatcher` and `src/agents/*` were deleted.
+- **NYX no longer scores with inline math.** It runs feature extraction →
+  8 weighted scorers → a structured `{score, reasoning, tags}` decision, with
+  the full breakdown persisted to `agent_runs`.
+- **Every agent execution is audited** in the `agent_runs` table: input,
+  decision, reasoning, tags, tool calls, latency, and LLM token usage.
+- **The LLM seam is wired but inert.** `AGENT_LLM_PROVIDER=openrouter` plus an
+  API key swaps the local strategies for real OpenRouter `chat/completions`
+  calls. Nothing calls an external network endpoint by default.
+
+Full details: [`live-agent-system/server/ARCHITECTURE.md`](./live-agent-system/server/ARCHITECTURE.md)
+
+### Run it
+
+```bash
+# 1. backend — API, agents, SQLite (seeds 6 tenants on first boot)
+cd live-agent-system/server && npm install && npm start      # :4100
+
+# 2. frontend — proxies /api to :4100
+cd live-agent-system && npm install && npm run dev           # :5173
+
+# verify the pipeline end to end (61 assertions, throwaway DB)
+cd live-agent-system/server && npm run verify
+```
+
+---
+
+**CORE** is a tenant-scoped business operations platform with a full admin
+dashboard, a live operations console, and three server-side agents that run
+against a persistent SQLite database.
 
 **Built for agencies, operators, and teams who want to white-label a complete operations system and ship it under their own brand.**
 
@@ -98,16 +138,17 @@ CRUD operations write through the same scoped adapter and publish audit events. 
 
 | Layer | Technology |
 |---|---|
-| Framework | React 19 + TypeScript |
-| Build | Vite 7 |
-| CSS | Tailwind CSS v4 + custom dark/light design system |
-| Icons | Lucide React |
-| Routing | Hash-based (`#/admin/...`, `#/console`) — works on any static host |
+| Frontend | React 19 + TypeScript 5.9, Vite 7, Tailwind CSS v4, lucide-react |
+| Backend | Node 22 + Express 4, TypeScript run via `tsx` |
+| Database | SQLite via `node:sqlite` (WAL) — `server/data/core.sqlite` |
+| Agent runtime | `server/src/agents` — NYX (scoring), TALA (replies), HERMES (orchestration) |
+| Event pipeline | `events` table as queue → `pipeline/runner.ts` → tools → `agent_runs` |
+| Tool layer | `whatsapp.send`, `email.send`, `booking.create`, `lead.assign` |
+| LLM | Pluggable: local strategies by default, OpenRouter `chat/completions` when configured |
+| Routing | Hash-based (`#/admin/...`, `#/console`); API is proxied at `/api` |
 | Build output | Single self-contained HTML file (`vite-plugin-singlefile`) |
-| State | Event bus + dispatcher + React contexts — no Redux, no Zustand |
-| Data | Browser localStorage mock (`core.admin.mock.v1`) — zero backend |
-| AI integration | OpenRouter model catalog (live fetch, daily cache, key validation, 5 free + 5 paid models pre-configured) |
-| Mock runtime | 6 seeded tenant workspaces: BAIA, Azarraga Glass, Marina Terrace, Aurelia Suites, Studio North, The Atrium |
+| Client state | Read cache over `/api/snapshot` + UI prefs in localStorage |
+| Seeded data | 6 tenant workspaces: BAIA, Azarraga Glass, Marina Terrace, Aurelia Suites, Studio North, The Atrium |
 
 ---
 

@@ -190,7 +190,7 @@ function AdminShell() {
             </span>
             <span>
               <Database size={10} style={{ display: "inline", marginRight: 4 }} />
-              {db.storage === "local" ? "Local storage" : "Memory only"}
+              {db.status === "ready" ? "Backend connected" : db.status === "error" ? "Backend unreachable" : "Connecting…"}
             </span>
             <span>v{PLATFORM.version}</span>
           </div>
@@ -346,7 +346,7 @@ function EnvironmentDialog({ onClose }: { onClose: () => void }) {
         </div>
         <div>
           <dt>Data adapter</dt>
-          <dd>services/db.ts / {db.storage === "local" ? "localStorage" : "in-memory fallback"}</dd>
+          <dd>services/db.ts → Node API → SQLite{db.lastSyncedAt ? ` · synced ${new Date(db.lastSyncedAt).toLocaleTimeString()}` : ""}</dd>
         </div>
         <div>
           <dt>OpenRouter models</dt>

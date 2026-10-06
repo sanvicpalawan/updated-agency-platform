@@ -393,7 +393,6 @@ export function LeadFormModal({ lead, onClose }: { lead?: Lead; onClose: () => v
           channel,
           status,
           assigned_agent: assignedAgent,
-          score: Number(score),
           inquiry,
         });
         notify(`Lead ${name} updated.`);
@@ -404,10 +403,9 @@ export function LeadFormModal({ lead, onClose }: { lead?: Lead; onClose: () => v
           channel,
           status,
           assigned_agent: assignedAgent,
-          score: Number(score),
           inquiry,
         });
-        notify("Lead created and routed through tenant agents.");
+        notify("Lead created. NYX will score it on the backend.");
       }
       onClose();
     } catch (err) {

@@ -78,7 +78,7 @@ export function AgentsConfigDrawer({ s }: { s: SystemState }) {
               className="mt-2 w-full border border-line bg-void/60 px-3 py-2 font-mono text-[12px] text-white/90 outline-none focus:border-accent/60"
             />
             <p className="micro-sm mt-1.5 text-white/25">
-              Stored in this browser&apos;s localStorage for this tenant. Demo build only — see SECURITY.md.
+              Persisted to SQLite through the backend API for this tenant.
             </p>
           </div>
         </Section>

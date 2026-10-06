@@ -239,7 +239,7 @@ export default function ToolsPage() {
                       label={`Enable ${tool.name}`}
                       onChange={(enabled) =>
                         act(
-                          () => toolsApi.updateTool(session, target.id, toolId, { enabled }),
+                          () => toolsApi.update(session, target.id, toolId, { enabled }),
                           `${tool.name} ${enabled ? "enabled" : "disabled"}.`,
                         )
                       }
@@ -413,7 +413,7 @@ function ToolSettingsModal({
       return;
     }
     try {
-      toolsApi.updateTool(session, tenant.id, tool.id, draft);
+      toolsApi.update(session, tenant.id, tool.id, draft);
       onSaved(`${draft.name} settings saved for ${tenant.name}.`);
       onClose();
     } catch (err) {

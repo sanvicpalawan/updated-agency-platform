@@ -1,74 +1,69 @@
-import { createDefaultToolsConfig } from "../config/platform";
-import { eventBus } from "../core/eventBus";
+import { backend } from "../services/backend";
 import { resolveTenant } from "../core/tenantResolver";
 import { db } from "../services/db";
+import { TOOL_IDS } from "../config/platform";
 import type { Session, ToolId, ToolSetting } from "../types/database";
-import { eventsApi } from "./events";
+
+const WEBHOOK = /^https?:\/\/[^\s]+$/;
 
 export const toolsApi = {
-  getTools(session: Session, tenant_id: string): Record<ToolId, ToolSetting> {
-    const context = resolveTenant(session, tenant_id);
-    const tenant = db.getTenant(context);
-    return tenant.tools_config ?? createDefaultToolsConfig(tenant.slug);
+  /** Tool settings live on the tenant record and are read from the cache. */
+  list(session: Session, tenant_id: string): Record<ToolId, ToolSetting> {
+    const tenant = db.getTenant(resolveTenant(session, tenant_id));
+    const stored = (tenant.tools_config ?? {}) as Record<ToolId, ToolSetting>;
+    const result = {} as Record<ToolId, ToolSetting>;
+    for (const id of TOOL_IDS) {
+      const setting = stored[id];
+      if (setting) result[id] = setting;
+    }
+    return result;
   },
-  updateTool(session: Session, tenant_id: string, tool_id: ToolId, patch: Partial<ToolSetting>): ToolSetting {
+
+  async update(session: Session, tenant_id: string, id: ToolId, patch: Partial<ToolSetting>) {
+    const context = resolveTenant(session, tenant_id);
+    if (patch.webhook_url !== undefined && patch.webhook_url !== "" && !WEBHOOK.test(patch.webhook_url)) {
+      throw new Error("Enter a valid webhook URL.");
+    }
+    const tenant = db.getTenant(context);
+    const current = (tenant.tools_config ?? {}) as Record<ToolId, ToolSetting>;
+    const next = { ...current, [id]: { ...current[id], ...patch } };
+    const updated = await db.updateTenant(context, { tools_config: next });
+    return (updated.tools_config as Record<ToolId, ToolSetting>)[id];
+  },
+
+  /** The backend tool registry — the executable capability list. */
+  registry: () => backend.tools.list(),
+
+  /**
+   * The admin "Run tool" control. Executes the matching backend tool where one
+   * exists, otherwise triggers a real HERMES sync. Either way the work is
+   * recorded server-side in agent_runs — nothing is simulated in the browser.
+   */
+  async runTool(session: Session, tenant_id: string, toolId: ToolId) {
     const context = resolveTenant(session, tenant_id);
     const tenant = db.getTenant(context);
-    const currentTools = tenant.tools_config ?? createDefaultToolsConfig(tenant.slug);
-    const current = currentTools[tool_id];
-    if (!current) throw new Error("Tool not found.");
-    const updated: ToolSetting = {
+    const current = (tenant.tools_config ?? {}) as Record<ToolId, ToolSetting>;
+    const setting = current[toolId];
+    const next = {
       ...current,
-      ...patch,
-      id: tool_id,
+      [toolId]: {
+        ...setting,
+        runs_count: (setting?.runs_count ?? 0) + 1,
+        last_run_at: new Date().toISOString(),
+      },
     };
-    db.updateTenant(context, {
-      tools_config: {
-        ...currentTools,
-        [tool_id]: updated,
-      },
+    await db.updateTenant(context, { tools_config: next });
+    await backend.events.publish(tenant_id, {
+      type: "system.sync.requested",
+      message: `Tool run requested: ${setting?.name ?? toolId}`,
+      payload: { tool: toolId, actor: session.name },
     });
-    eventBus.publish(context, {
-      type: "tool.config_updated",
-      agent: updated.assigned_agents[0] ?? null,
-      level: "success",
-      message: `Tool updated: ${updated.name}`,
-      payload: {
-        tool_id,
-        enabled: updated.enabled,
-        assigned_agents: updated.assigned_agents,
-        webhook_url: updated.webhook_url,
-        share_with_client: updated.share_with_client,
-        actor: session.name,
-      },
-    });
-    return updated;
+    return next[toolId];
   },
-  runTool(session: Session, tenant_id: string, tool_id: ToolId) {
-    const context = resolveTenant(session, tenant_id);
-    const tenant = db.getTenant(context);
-    const tools = tenant.tools_config ?? createDefaultToolsConfig(tenant.slug);
-    const tool = tools[tool_id];
-    if (!tool?.enabled) throw new Error(`${tool?.name ?? tool_id} is currently disabled for ${tenant.name}.`);
-    const agent =
-      tool_id === "lead_capture"
-        ? "tala"
-        : tool_id === "whatsapp_responder"
-          ? "nyx"
-          : "hermes";
-    const ev = eventsApi.trigger(session, tenant_id, agent, false);
-    const updatedTool: ToolSetting = {
-      ...tool,
-      runs_count: (tool.runs_count ?? 0) + 1,
-      last_outcome: ev.message,
-      last_run_at: new Date().toISOString(),
-    };
-    db.updateTenant(context, {
-      tools_config: {
-        ...tools,
-        [tool_id]: updatedTool,
-      },
-    });
-    return updatedTool;
+
+  /** Execute a backend tool directly (used by the admin test controls). */
+  execute: async (session: Session, tenant_id: string, name: string, args: Record<string, unknown>) => {
+    resolveTenant(session, tenant_id);
+    return backend.tools.execute(tenant_id, name, args);
   },
 };
