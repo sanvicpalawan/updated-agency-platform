@@ -1,0 +1,9 @@
+# SQLite database files (WAL mode produces -wal/-shm alongside)
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Build output
+dist/
+node_modules/

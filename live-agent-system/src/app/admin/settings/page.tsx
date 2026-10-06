@@ -357,7 +357,7 @@ export default function SettingsPage() {
               <Save size={12} /> Save retention
             </button>
             <dl className="detail-list" style={{ marginTop: 14 }}>
-              <div><dt>Storage</dt><dd>Browser {db.storage === "local" ? "localStorage" : "memory"}</dd></div>
+              <div><dt>Storage</dt><dd>SQLite via backend API ({db.status})</dd></div>
               <div><dt>Workspaces</dt><dd>{allTenants.length}</dd></div>
               <div><dt>Model catalog</dt><dd>{catalog.total} models · {catalog.source}</dd></div>
               <div>

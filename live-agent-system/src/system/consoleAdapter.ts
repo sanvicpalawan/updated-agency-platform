@@ -14,8 +14,6 @@ import {
   MOCK_ADMIN,
   TOOL_IDS,
 } from "../config/platform";
-import { registerDispatcher, unregisterDispatcher } from "../core/dispatcher";
-import { eventBus } from "../core/eventBus";
 import { resolveTenant } from "../core/tenantResolver";
 import { db } from "../services/db";
 import type {
@@ -92,7 +90,7 @@ class ConsoleAdapter {
   boot() {
     this.stop();
     this.selectStoredTenant();
-    registerDispatcher();
+    void db.load().catch(() => undefined);
     this.unsubscribe = db.subscribe(this.refresh);
     this.clock = window.setInterval(this.refresh, 1000);
     let turn = 0;
@@ -110,7 +108,16 @@ class ConsoleAdapter {
     if (this.simulator !== null) window.clearInterval(this.simulator);
     this.clock = null; this.simulator = null;
     this.unsubscribe?.(); this.unsubscribe = null;
-    unregisterDispatcher();
+  }
+
+  /**
+   * Publish an event to the backend pipeline. Fire-and-forget from the console's
+   * synchronous command wrapper; the cache refresh picks up the result.
+   */
+  private publish(type: string, message: string, payload: Record<string, unknown> = {}, level?: "info" | "success" | "warning" | "error") {
+    void eventsApi
+      .publish(MOCK_ADMIN, this.context().tenant_id, { type, message, payload, level })
+      .catch(() => undefined);
   }
 
   private command(label: string, action: () => void) {
@@ -170,7 +177,7 @@ class ConsoleAdapter {
 
   toggleTool(toolId: ToolId, enabled: boolean) {
     this.command(`${toolId} ${enabled ? "enabled" : "disabled"}`, () => {
-      toolsApi.updateTool(MOCK_ADMIN, this.context().tenant_id, toolId, { enabled });
+      toolsApi.update(MOCK_ADMIN, this.context().tenant_id, toolId, { enabled });
     });
   }
 
@@ -217,7 +224,7 @@ class ConsoleAdapter {
       const tenant = db.getTenant(context);
       const config = tenant.console_config ?? defaultConsoleConfig;
       tenantsApi.update(MOCK_ADMIN, tenant.id, { console_config: { ...config, channels: { ...config.channels, [id]: connected } } });
-      eventBus.publish(context, { type: "channel.mock_updated", message: `${id} mock channel ${connected ? "enabled" : "disabled"}`, payload: { channel: id, connected, provider: "mock_only" } });
+      this.publish("channel.mock_updated", `${id} mock channel ${connected ? "enabled" : "disabled"}`, { channel: id, connected, provider: "mock_only" });
     });
   }
 
@@ -246,19 +253,19 @@ class ConsoleAdapter {
       const context = this.context();
       const tenant = db.getTenant(context);
       tenantsApi.update(MOCK_ADMIN, tenant.id, { console_config: { ...(tenant.console_config ?? defaultConsoleConfig), last_reviewed_at: new Date().toISOString() } });
-      eventBus.publish(context, { type: "review.completed", level: "success", message: "Operator reviewed the attention queue", payload: { actor: MOCK_ADMIN.name } });
+      this.publish("review.completed", "Operator reviewed the attention queue", { actor: MOCK_ADMIN.name }, "success");
     });
   }
 
   exportBundle() {
-    this.command("Tenant data export prepared", () => { eventBus.publish(this.context(), { type: "data.exported", level: "success", message: "Tenant data export prepared", payload: { actor: MOCK_ADMIN.name } }); });
+    this.command("Tenant data export prepared", () => { this.publish("data.exported", "Tenant data export prepared", { actor: MOCK_ADMIN.name }, "success"); });
   }
 
   connectWhatsApp() { this.setChannel("whatsapp", true); }
 
   resetAll() {
     this.openedAt = Date.now(); this.tick = 0; this.overlay = null;
-    this.command("Console runtime reset; tenant data retained", () => { eventBus.publish(this.context(), { type: "console.reset", message: "Console view reset. Tenant records retained." }); });
+    this.command("Console runtime reset; tenant data retained", () => { this.publish("console.reset", "Console view reset. Tenant records retained."); });
   }
 
   private derive(): SystemState {

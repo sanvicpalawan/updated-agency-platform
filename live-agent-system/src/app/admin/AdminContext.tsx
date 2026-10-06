@@ -2,7 +2,6 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { eventsApi } from "../../api/events";
 import { getAdminData, tenantsApi } from "../../api/tenants";
 import { AGENT_IDS, MOCK_ADMIN } from "../../config/platform";
-import { registerDispatcher, unregisterDispatcher } from "../../core/dispatcher";
 import { db } from "../../services/db";
 import type { AdminData, Session, Tenant } from "../../types/database";
 import { errorMessage, type Period } from "./utils";
@@ -101,9 +100,12 @@ export function AdminProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("hashchange", handle);
   }, []);
 
+  // Pull the platform snapshot on mount, then keep the cache warm so
+  // backend-driven agent activity shows up without a manual refresh.
   useEffect(() => {
-    registerDispatcher();
-    return () => { unregisterDispatcher(); timers.current.forEach(clearTimeout); };
+    void db.load().catch(() => undefined);
+    const poll = window.setInterval(() => { void db.load(true).catch(() => undefined); }, 10_000);
+    return () => { window.clearInterval(poll); timers.current.forEach(clearTimeout); };
   }, []);
 
   useEffect(() => {
